@@ -51,7 +51,7 @@ export function parseBureauReport(rawText) {
     "auto loan",
     "vehicle loan",
     "personal loan",
-    "home loan",
+    "home loans",
     "lap"
   ];
 
