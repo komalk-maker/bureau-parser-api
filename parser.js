@@ -24,7 +24,7 @@ export function parseBureauReport(rawText) {
     }
   }
 
-  // Fallback: pick first 3-digit number between 300–900
+  // Fallback: first 3-digit number between 300–900
   if (score === null) {
     const allNums = text.match(/\b\d{3}\b/g) || [];
     for (const n of allNums) {
@@ -36,23 +36,28 @@ export function parseBureauReport(rawText) {
     }
   }
 
-  // ---------- LOANS / ACCOUNTS ----------
+  // ---------- LINES & CONTEXT ----------
   const lines = text.split("\n").map(l => l.trim()).filter(Boolean);
 
   const loanKeywords = [
     "loan",
-    "credit card",
-    "card",
     "housing finance",
     "hfl",
     "mortgage",
     "overdraft",
     "od",
-    "auto loan",
     "vehicle loan",
+    "auto loan",
     "personal loan",
-    "home loans",
+    "home loan",
     "lap"
+  ];
+
+  const cardKeywords = [
+    "credit card",
+    "card type",
+    "card account",
+    "cc account"
   ];
 
   const statusKeywords = [
@@ -65,39 +70,91 @@ export function parseBureauReport(rawText) {
 
   const loans = [];
 
+  // Totals
+  let totalLoanSanctioned = 0;
+  let totalLoanOutstanding = 0;
+  let totalCardLimit = 0;
+  let totalCardOutstanding = 0;
+
+  // Helper to parse an amount like "1,23,456.00"
+  const parseAmount = str => {
+    if (!str) return 0;
+    const cleaned = str.replace(/,/g, "");
+    const num = parseFloat(cleaned);
+    return isNaN(num) ? 0 : num;
+  };
+
+  // Recent lines buffer to guess context
+  const recent = [];
+
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
+    const lower = line.toLowerCase();
+    recent.push(line);
+    if (recent.length > 6) recent.shift();
 
-    const lowered = line.toLowerCase();
-    if (!loanKeywords.some(k => lowered.includes(k))) continue;
+    // ---------- CLASSIFY LINE FOR LOAN LIST ----------
+    if (
+      loanKeywords.some(k => lower.includes(k)) ||
+      cardKeywords.some(k => lower.includes(k))
+    ) {
+      let type = "Other";
+      if (/home loan/i.test(line)) type = "Home Loan";
+      else if (/personal loan/i.test(line)) type = "Personal Loan";
+      else if (/credit card/i.test(line) || /\bcard\b/i.test(line)) type = "Credit Card";
+      else if (/overdraft|od/i.test(line)) type = "Overdraft";
+      else if (/vehicle|auto/i.test(line)) type = "Auto / Vehicle Loan";
 
-    // Rough classification
-    let type = "Other";
-    if (/home loan/i.test(line)) type = "Home Loan";
-    else if (/personal loan/i.test(line)) type = "Personal Loan";
-    else if (/credit card/i.test(line) || /\bcard\b/i.test(line)) type = "Credit Card";
-    else if (/overdraft|od/i.test(line)) type = "Overdraft";
-    else if (/vehicle|auto/i.test(line)) type = "Auto / Vehicle Loan";
+      let status = "Unknown";
+      const windowText = (line + " " + (lines[i + 1] || "")).toLowerCase();
+      for (const s of statusKeywords) {
+        if (windowText.includes(s.key)) {
+          status = s.value;
+          break;
+        }
+      }
 
-    // Find status in current + next line (some reports split it)
-    let status = "Unknown";
-    const windowText = (line + " " + (lines[i + 1] || "")).toLowerCase();
+      loans.push({
+        type,
+        status,
+        line
+      });
+    }
 
-    for (const s of statusKeywords) {
-      if (windowText.includes(s.key)) {
-        status = s.value;
-        break;
+    // ---------- AMOUNT EXTRACTION FOR TOTALS ----------
+    // Decide if nearby context is a card or loan
+    const windowLines = recent.join(" ").toLowerCase();
+    const isCardContext = cardKeywords.some(k => windowLines.includes(k));
+    const isLoanContext = !isCardContext && loanKeywords.some(k => windowLines.includes(k));
+
+    // Current Balance / Outstanding
+    if (/current balance|curr balance|outstanding balance|amt outstanding|amount outstanding/i.test(lower)) {
+      const amtMatch = line.match(/(\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?/g);
+      if (amtMatch) {
+        const amt = parseAmount(amtMatch[amtMatch.length - 1]);
+        if (isCardContext) {
+          totalCardOutstanding += amt;
+        } else {
+          totalLoanOutstanding += amt;
+        }
       }
     }
 
-    loans.push({
-      type,
-      status,
-      line
-    });
+    // Sanctioned / Credit Limit / High Credit
+    if (/sanctioned amount|amount sanctioned|disbursed amount|credit limit|high credit/i.test(lower)) {
+      const amtMatch = line.match(/(\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?/g);
+      if (amtMatch) {
+        const amt = parseAmount(amtMatch[amtMatch.length - 1]);
+        if (isCardContext) {
+          totalCardLimit += amt;
+        } else {
+          totalLoanSanctioned += amt;
+        }
+      }
+    }
   }
 
-  // Remove near-duplicate loan lines (same text repeated)
+  // Remove duplicate loan lines
   const uniqueLoans = [];
   const seen = new Set();
   for (const l of loans) {
@@ -108,19 +165,16 @@ export function parseBureauReport(rawText) {
   }
 
   // ---------- ENQUIRIES ----------
-  // Very simple approximation: count lines containing "enquiry date" or "enquiry amount"
   let enquiryCount = 0;
   for (const line of lines) {
-    if (/enquiry date|enquiry amount|enquiries/i.test(line)) {
+    if (/enquiry date|enquiry amount|credit enquiries/i.test(line.toLowerCase())) {
       enquiryCount++;
     }
   }
 
   // ---------- DPD / OVERDUE ----------
-  // Look for patterns of 30/60/90 past due in context of DPD/Days Past Due
   let dpd = "0 - Clean";
   const dpdContext = text.match(/(dpd|days past due|payment history)[\s\S]{0,300}/i);
-
   if (dpdContext) {
     const ctx = dpdContext[0];
     if (/\b(30|60|90|120|150|180)\b/.test(ctx)) {
@@ -132,6 +186,12 @@ export function parseBureauReport(rawText) {
     score,
     loans: uniqueLoans,
     enquiryCount,
-    dpd
+    dpd,
+    totals: {
+      loanSanctioned: totalLoanSanctioned,
+      loanOutstanding: totalLoanOutstanding,
+      cardLimit: totalCardLimit,
+      cardOutstanding: totalCardOutstanding
+    }
   };
 }
