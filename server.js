@@ -1,3 +1,7 @@
+// ================================
+// KALKI FINSERV – AI BUREAU PARSER BACKEND
+// ================================
+
 import express from "express";
 import multer from "multer";
 import pdf from "pdf-parse";
@@ -9,21 +13,21 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// File upload directory
 const upload = multer({ dest: "uploads/" });
 
-// --- OpenAI client ---
+// OpenAI client
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-// --- OCR helper using OCR.space with Blob/FormData ---
+// ==============================================
+// OCR SPACE (for scanned PDFs)
+// ==============================================
 async function performOcrOnPdf(filePath) {
   const apiKey = process.env.OCR_SPACE_API_KEY;
-  if (!apiKey) {
-    throw new Error("OCR_SPACE_API_KEY not configured");
-  }
+  if (!apiKey) throw new Error("OCR_SPACE_API_KEY not configured");
 
-  // Read file and wrap in a Blob for Node's built-in FormData/fetch
   const buffer = await fs.promises.readFile(filePath);
   const blob = new Blob([buffer], { type: "application/pdf" });
 
@@ -35,45 +39,41 @@ async function performOcrOnPdf(filePath) {
 
   const res = await fetch("https://api.ocr.space/parse/image", {
     method: "POST",
-    body: formData,
+    body: formData
   });
 
-  if (!res.ok) {
-    throw new Error(`OCR API error: HTTP ${res.status}`);
-  }
-
+  if (!res.ok) throw new Error("OCR API error: " + res.status);
   const data = await res.json();
 
-  if (data.OCRExitCode !== 1 || !data.ParsedResults || !data.ParsedResults.length) {
+  if (data.OCRExitCode !== 1 || !data.ParsedResults?.length)
     throw new Error("OCR did not return parsed text");
-  }
 
-  const parsedText = data.ParsedResults.map((r) => r.ParsedText || "").join("\n");
-  return parsedText;
+  return data.ParsedResults.map(r => r.ParsedText || "").join("\n");
 }
 
-// --- AI parser using OpenAI Responses API ---
+// ==============================================
+// AI PARSER – EXTRACT SCORE, LOANS, TOTALS, ETC.
+// ==============================================
 async function analyzeWithAI(extractedText) {
-  if (!process.env.OPENAI_API_KEY) {
-    throw new Error("OPENAI_API_KEY not configured");
-  }
+  if (!process.env.OPENAI_API_KEY)
+    throw new Error("OPENAI_API_KEY missing");
 
   const prompt = `
-You are an expert at reading INDIAN credit bureau reports (CIBIL / Experian / CRIF / Equifax).
+You are an expert at reading INDIAN credit bureau reports.
 
-From the TEXT of the report below, extract:
+Extract:
 
-- exact CREDIT SCORE (3 digits, 300–900) when visible
-- total number of CREDIT ENQUIRIES
-- DPD / overdues summary: a short human-readable sentence
-- detailed LOAN / CREDIT ACCOUNT list
-- TOTALS:
-  - loanSanctioned: sum of sanctioned amounts of all TERM / LOAN accounts (home loan, LAP, auto, PL, etc.)
-  - loanOutstanding: sum of current outstanding / current balance of all TERM / LOAN accounts
-  - cardLimit: sum of credit limits of all CREDIT CARD accounts
-  - cardOutstanding: sum of current outstanding balances of all CREDIT CARD accounts
+- Score (300–900)
+- Enquiry count
+- DPD summary
+- Loan list
+- Totals:
+  - loanSanctioned
+  - loanOutstanding
+  - cardLimit
+  - cardOutstanding
 
-Return STRICT JSON with this schema (no extra fields):
+Return STRICT JSON:
 
 {
   "score": number | null,
@@ -94,52 +94,53 @@ Return STRICT JSON with this schema (no extra fields):
   ]
 }
 
-If something is missing in the text, put 0 or null accordingly.
-
-================= REPORT TEXT START =================
+REPORT TEXT:
 ${extractedText}
-================= REPORT TEXT END =================
 `;
 
+  // ************* NEW FIX *************
   const response = await openai.responses.create({
     model: "gpt-4.1-mini",
     input: prompt,
-    response_format: { type: "json_object" },
+    text: { format: "json" }  // <-- UPDATED
   });
 
   const raw = response.output[0].content[0].text;
-  let parsed;
 
+  let parsed;
   try {
     parsed = JSON.parse(raw);
   } catch (e) {
-    console.error("Error parsing AI JSON:", e, raw);
-    throw new Error("AI parser returned invalid JSON");
+    console.error("AI JSON Error:", raw);
+    throw new Error("AI returned invalid JSON");
   }
 
+  // Fallbacks
   parsed.score = parsed.score ?? null;
   parsed.enquiryCount = parsed.enquiryCount ?? 0;
   parsed.dpd = parsed.dpd || "0 - Clean";
+
   parsed.totals = parsed.totals || {
     loanSanctioned: 0,
     loanOutstanding: 0,
     cardLimit: 0,
     cardOutstanding: 0,
   };
+
   parsed.loans = Array.isArray(parsed.loans) ? parsed.loans : [];
 
   return parsed;
 }
 
-// ---- Main analyze endpoint ----
+// ==============================================
+// MAIN API ENDPOINT: /analyze
+// ==============================================
 app.post("/analyze", upload.single("pdf"), async (req, res) => {
   let filePath;
+
   try {
     if (!req.file) {
-      return res.json({
-        success: false,
-        message: "No PDF file received.",
-      });
+      return res.json({ success: false, message: "No PDF received." });
     }
 
     filePath = req.file.path;
@@ -148,20 +149,20 @@ app.post("/analyze", upload.single("pdf"), async (req, res) => {
     const pdfData = await pdf(dataBuffer);
     let extractedText = pdfData.text || "";
 
-    console.log("Initial extracted text length:", extractedText.length);
+    console.log("Initial text length:", extractedText.length);
 
-    // If very little text (likely scanned), use OCR
+    // Use OCR if the PDF is scanned / low text
     if (!extractedText || extractedText.trim().length < 300) {
-      console.log("Text too short, attempting OCR...");
+      console.log("Running OCR...");
       try {
         extractedText = await performOcrOnPdf(filePath);
-        console.log("OCR extracted text length:", extractedText.length);
+        console.log("OCR text length:", extractedText.length);
       } catch (ocrErr) {
-        console.error("OCR failed:", ocrErr);
+        console.error("OCR Error:", ocrErr);
         return res.json({
           success: false,
           message:
-            "We could not read this report automatically (OCR failed). Please upload the original PDF downloaded from the bureau website (not a photo or screenshot).",
+            "OCR Failed. Please upload an original PDF (not a photo or screenshot).",
         });
       }
     }
@@ -170,16 +171,16 @@ app.post("/analyze", upload.single("pdf"), async (req, res) => {
       return res.json({
         success: false,
         message:
-          "We could not extract enough text from this report. Please upload a clearer PDF directly downloaded from the bureau.",
+          "Unreadable PDF. Please upload a clearer report downloaded from the bureau.",
       });
     }
 
-    // Use AI to interpret the text
+    // Run AI interpretation
     let aiResult;
     try {
       aiResult = await analyzeWithAI(extractedText);
     } catch (aiErr) {
-      console.error("AI parsing failed:", aiErr);
+      console.error("AI ERROR:", aiErr);
       return res.json({
         success: false,
         message: "AI parsing error: " + aiErr.message,
@@ -188,29 +189,35 @@ app.post("/analyze", upload.single("pdf"), async (req, res) => {
 
     res.json({
       success: true,
-      message: "PDF parsed successfully by AI",
+      message: "PDF parsed successfully",
       result: aiResult,
     });
+
   } catch (err) {
-    console.error("Unexpected error in /analyze:", err);
-    res.status(500).json({
+    console.error("Fatal Error:", err);
+    return res.status(500).json({
       success: false,
       message: "Error parsing PDF",
     });
+
   } finally {
     if (filePath) {
       try {
         fs.unlinkSync(filePath);
       } catch (e) {
-        console.error("Error deleting temp file:", e);
+        console.error("File cleanup error:", e);
       }
     }
   }
 });
 
+// Home test route
 app.get("/", (req, res) => {
-  res.send("Bureau Parser API Working with AI Parser");
+  res.send("Bureau Parser API with AI is LIVE 🚀");
 });
 
+// Server start
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+app.listen(PORT, () =>
+  console.log(`Server running on port ${PORT}`)
+);
