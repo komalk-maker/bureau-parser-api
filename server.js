@@ -39,70 +39,104 @@ async function performOcrOnPdf(filePath) {
 
   const res = await fetch("https://api.ocr.space/parse/image", {
     method: "POST",
-    body: formData
+    body: formData,
   });
 
   if (!res.ok) throw new Error("OCR API error: " + res.status);
   const data = await res.json();
 
-  if (data.OCRExitCode !== 1 || !data.ParsedResults?.length)
+  if (data.OCRExitCode !== 1 || !data.ParsedResults?.length) {
     throw new Error("OCR did not return parsed text");
+  }
 
-  return data.ParsedResults.map(r => r.ParsedText || "").join("\n");
+  return data.ParsedResults.map((r) => r.ParsedText || "").join("\n");
 }
 
 // ==============================================
 // AI PARSER – EXTRACT SCORE, LOANS, TOTALS, ETC.
 // ==============================================
 async function analyzeWithAI(extractedText) {
-  if (!process.env.OPENAI_API_KEY)
+  if (!process.env.OPENAI_API_KEY) {
     throw new Error("OPENAI_API_KEY missing");
+  }
 
   const prompt = `
-You are an expert at reading INDIAN credit bureau reports.
+You are an expert at reading INDIAN credit bureau reports (CIBIL / Experian / CRIF / Equifax).
 
-Extract:
+From the TEXT below, extract:
 
-- Score (300–900)
-- Enquiry count
-- DPD summary
-- Loan list
-- Totals:
-  - loanSanctioned
-  - loanOutstanding
-  - cardLimit
-  - cardOutstanding
+- score: the main credit score (300–900). If not visible, use 0.
+- enquiryCount: total number of credit enquiries.
+- dpd: short human-readable summary of delinquencies / overdues (e.g. "0 - Clean" or "30+ DPD in one account").
+- loans: array of credit facilities, each with:
+  - type: e.g. "Home Loan", "Personal Loan", "Credit Card", "Auto Loan", "OD", "LAP", etc.
+  - status: e.g. "Active", "Closed", "Settled", "Written Off".
+  - line: short snippet from the report that describes this account.
+- totals:
+  - loanSanctioned: sum of sanctioned amounts of all TERM LOANS (home, LAP, auto, PL, OD with fixed limit, etc.).
+  - loanOutstanding: sum of current outstanding / current balance of all TERM LOANS.
+  - cardLimit: sum of credit limits of all CREDIT CARD accounts.
+  - cardOutstanding: sum of current outstanding balances of all CREDIT CARD accounts.
 
-Return STRICT JSON:
-
-{
-  "score": number | null,
-  "enquiryCount": number,
-  "dpd": string,
-  "totals": {
-    "loanSanctioned": number,
-    "loanOutstanding": number,
-    "cardLimit": number,
-    "cardOutstanding": number
-  },
-  "loans": [
-    {
-      "type": string,
-      "status": string,
-      "line": string
-    }
-  ]
-}
+IMPORTANT:
+- Only one score value: the main bureau score. Ignore any sample numbers or ranges.
+- If a number is missing for a total, use 0 (do NOT omit the field).
+- Always follow the JSON schema exactly (no extra fields, no comments, no text outside JSON).
 
 REPORT TEXT:
 ${extractedText}
 `;
 
-  // ************* NEW FIX *************
+  // NEW: use text.format with json_schema (structured outputs)
   const response = await openai.responses.create({
-    model: "gpt-4.1-mini",
+    model: "gpt-4.1-mini", // cheap + good, you can upgrade later
     input: prompt,
-    text: { format: "json" }  // <-- UPDATED
+    text: {
+      format: {
+        type: "json_schema",
+        name: "bureau_summary",
+        strict: true,
+        schema: {
+          type: "object",
+          properties: {
+            score: { type: "number" },
+            enquiryCount: { type: "number" },
+            dpd: { type: "string" },
+            totals: {
+              type: "object",
+              properties: {
+                loanSanctioned: { type: "number" },
+                loanOutstanding: { type: "number" },
+                cardLimit: { type: "number" },
+                cardOutstanding: { type: "number" }
+              },
+              required: [
+                "loanSanctioned",
+                "loanOutstanding",
+                "cardLimit",
+                "cardOutstanding"
+              ],
+              additionalProperties: false
+            },
+            loans: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  type: { type: "string" },
+                  status: { type: "string" },
+                  line: { type: "string" }
+                },
+                required: ["type", "status", "line"],
+                additionalProperties: false
+              }
+            }
+          },
+          required: ["score", "enquiryCount", "dpd", "totals", "loans"],
+          additionalProperties: false
+        }
+      }
+    }
   });
 
   const raw = response.output[0].content[0].text;
@@ -115,17 +149,19 @@ ${extractedText}
     throw new Error("AI returned invalid JSON");
   }
 
-  // Fallbacks
-  parsed.score = parsed.score ?? null;
-  parsed.enquiryCount = parsed.enquiryCount ?? 0;
+  // Fallbacks / safety
+  parsed.score = typeof parsed.score === "number" ? parsed.score : 0;
+  parsed.enquiryCount = typeof parsed.enquiryCount === "number" ? parsed.enquiryCount : 0;
   parsed.dpd = parsed.dpd || "0 - Clean";
 
-  parsed.totals = parsed.totals || {
-    loanSanctioned: 0,
-    loanOutstanding: 0,
-    cardLimit: 0,
-    cardOutstanding: 0,
-  };
+  if (!parsed.totals) {
+    parsed.totals = {
+      loanSanctioned: 0,
+      loanOutstanding: 0,
+      cardLimit: 0,
+      cardOutstanding: 0,
+    };
+  }
 
   parsed.loans = Array.isArray(parsed.loans) ? parsed.loans : [];
 
@@ -151,7 +187,7 @@ app.post("/analyze", upload.single("pdf"), async (req, res) => {
 
     console.log("Initial text length:", extractedText.length);
 
-    // Use OCR if the PDF is scanned / low text
+    // If text is very short, assume scanned PDF → OCR
     if (!extractedText || extractedText.trim().length < 300) {
       console.log("Running OCR...");
       try {
@@ -162,7 +198,7 @@ app.post("/analyze", upload.single("pdf"), async (req, res) => {
         return res.json({
           success: false,
           message:
-            "OCR Failed. Please upload an original PDF (not a photo or screenshot).",
+            "OCR failed. Please upload the original bureau PDF (not a photo or screenshot).",
         });
       }
     }
@@ -171,7 +207,7 @@ app.post("/analyze", upload.single("pdf"), async (req, res) => {
       return res.json({
         success: false,
         message:
-          "Unreadable PDF. Please upload a clearer report downloaded from the bureau.",
+          "Unreadable PDF. Please upload a clearer report downloaded directly from the bureau.",
       });
     }
 
@@ -199,7 +235,6 @@ app.post("/analyze", upload.single("pdf"), async (req, res) => {
       success: false,
       message: "Error parsing PDF",
     });
-
   } finally {
     if (filePath) {
       try {
@@ -218,6 +253,4 @@ app.get("/", (req, res) => {
 
 // Server start
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () =>
-  console.log(`Server running on port ${PORT}`)
-);
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
