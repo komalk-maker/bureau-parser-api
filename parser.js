@@ -1,44 +1,137 @@
-export function parseBureauReport(text) {
-    
-    const extractBetween = (text, start, end) => {
-        const s = text.indexOf(start);
-        if (s === -1) return null;
-        const e = text.indexOf(end, s + start.length);
-        if (e === -1) return text.substring(s + start.length).trim();
-        return text.substring(s + start.length, e).trim();
-    };
+// parser.js
 
-    // Score extraction (supports Experian/CIBIL/CRIF layouts)
-    const scoreMatch = text.match(/(Credit Score|Experian Credit Score|CIBIL Score)[^\d]*(\d{3})/i);
-    const score = scoreMatch ? parseInt(scoreMatch[2]) : null;
+export function parseBureauReport(rawText) {
+  // Normalise text a bit
+  const text = rawText.replace(/\r/g, "").replace(/[^\S\r\n]+/g, " ");
 
-    // Extract loan accounts
-    const loanLines = text.split("\n").filter(l =>
-        l.match(/Loan|Account|Bank|Finance|Credit Card/i)
-    );
+  // ---------- CREDIT SCORE ----------
+  let score = null;
 
-    const loans = loanLines.map(l => ({
-        line: l,
-        type: l.match(/Home/i) ? "Home Loan" :
-              l.match(/Personal/i) ? "Personal Loan" :
-              l.match(/Credit Card/i) ? "Credit Card" :
-              l.match(/Consumer/i) ? "Consumer Loan" : "Other",
-        status: l.match(/active|open/i) ? "Active" :
-                l.match(/closed/i) ? "Closed" : "Unknown"
-    }));
+  const scorePatterns = [
+    /(experian|cibil|crif|equifax)[^\d]{0,40}(\d{3})/i,
+    /(credit\s+score)[^\d]{0,40}(\d{3})/i,
+    /\bscore\s*[:\-]?\s*(\d{3})\b/i
+  ];
 
-    // Extract enquiries
-    const enquiryMatch = text.match(/Enquiries|Credit Enquiries/gi);
-    const enquiryCount = enquiryMatch ? enquiryMatch.length : 0;
+  for (const re of scorePatterns) {
+    const m = text.match(re);
+    if (m) {
+      const val = parseInt(m[m.length - 1], 10);
+      if (val >= 300 && val <= 900) {
+        score = val;
+        break;
+      }
+    }
+  }
 
-    // Detect late payments
-    const dpdMatch = text.match(/30|60|90|120/g);
-    const hasDPD = dpdMatch ? "Possible DPD (needs manual check)" : "0 - Clean";
+  // Fallback: pick first 3-digit number between 300–900
+  if (score === null) {
+    const allNums = text.match(/\b\d{3}\b/g) || [];
+    for (const n of allNums) {
+      const val = parseInt(n, 10);
+      if (val >= 300 && val <= 900) {
+        score = val;
+        break;
+      }
+    }
+  }
 
-    return {
-        score,
-        loans,
-        enquiryCount,
-        dpd: hasDPD
-    };
+  // ---------- LOANS / ACCOUNTS ----------
+  const lines = text.split("\n").map(l => l.trim()).filter(Boolean);
+
+  const loanKeywords = [
+    "loan",
+    "credit card",
+    "card",
+    "housing finance",
+    "hfl",
+    "mortgage",
+    "overdraft",
+    "od",
+    "auto loan",
+    "vehicle loan",
+    "personal loan",
+    "home loan",
+    "lap"
+  ];
+
+  const statusKeywords = [
+    { key: "closed", value: "Closed" },
+    { key: "active", value: "Active" },
+    { key: "open", value: "Active" },
+    { key: "settled", value: "Settled" },
+    { key: "written off", value: "Written Off" }
+  ];
+
+  const loans = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+
+    const lowered = line.toLowerCase();
+    if (!loanKeywords.some(k => lowered.includes(k))) continue;
+
+    // Rough classification
+    let type = "Other";
+    if (/home loan/i.test(line)) type = "Home Loan";
+    else if (/personal loan/i.test(line)) type = "Personal Loan";
+    else if (/credit card/i.test(line) || /\bcard\b/i.test(line)) type = "Credit Card";
+    else if (/overdraft|od/i.test(line)) type = "Overdraft";
+    else if (/vehicle|auto/i.test(line)) type = "Auto / Vehicle Loan";
+
+    // Find status in current + next line (some reports split it)
+    let status = "Unknown";
+    const windowText = (line + " " + (lines[i + 1] || "")).toLowerCase();
+
+    for (const s of statusKeywords) {
+      if (windowText.includes(s.key)) {
+        status = s.value;
+        break;
+      }
+    }
+
+    loans.push({
+      type,
+      status,
+      line
+    });
+  }
+
+  // Remove near-duplicate loan lines (same text repeated)
+  const uniqueLoans = [];
+  const seen = new Set();
+  for (const l of loans) {
+    if (!seen.has(l.line)) {
+      seen.add(l.line);
+      uniqueLoans.push(l);
+    }
+  }
+
+  // ---------- ENQUIRIES ----------
+  // Very simple approximation: count lines containing "enquiry date" or "enquiry amount"
+  let enquiryCount = 0;
+  for (const line of lines) {
+    if (/enquiry date|enquiry amount|enquiries/i.test(line)) {
+      enquiryCount++;
+    }
+  }
+
+  // ---------- DPD / OVERDUE ----------
+  // Look for patterns of 30/60/90 past due in context of DPD/Days Past Due
+  let dpd = "0 - Clean";
+  const dpdContext = text.match(/(dpd|days past due|payment history)[\s\S]{0,300}/i);
+
+  if (dpdContext) {
+    const ctx = dpdContext[0];
+    if (/\b(30|60|90|120|150|180)\b/.test(ctx)) {
+      dpd = "Possible delinquencies (30+ DPD found, manual review needed)";
+    }
+  }
+
+  return {
+    score,
+    loans: uniqueLoans,
+    enquiryCount,
+    dpd
+  };
 }
