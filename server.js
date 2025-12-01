@@ -1,4 +1,3 @@
-// server.js
 import express from "express";
 import multer from "multer";
 import pdf from "pdf-parse";
@@ -12,38 +11,40 @@ app.use(express.json());
 
 const upload = multer({ dest: "uploads/" });
 
-// --- OpenAI client (AI parser) ---
+// --- OpenAI client ---
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-// --- OCR helper using OCR.space (fallback for image-only PDFs) ---
+// --- OCR helper using OCR.space with Blob/FormData ---
 async function performOcrOnPdf(filePath) {
   const apiKey = process.env.OCR_SPACE_API_KEY;
   if (!apiKey) {
-    console.error("Missing OCR_SPACE_API_KEY env variable");
-    throw new Error("OCR not configured");
+    throw new Error("OCR_SPACE_API_KEY not configured");
   }
 
-  const form = new FormData();
-  form.append("apikey", apiKey);
-  form.append("file", fs.createReadStream(filePath));
-  form.append("language", "eng");
-  form.append("isOverlayRequired", "false");
+  // Read file and wrap in a Blob for Node's built-in FormData/fetch
+  const buffer = await fs.promises.readFile(filePath);
+  const blob = new Blob([buffer], { type: "application/pdf" });
+
+  const formData = new FormData();
+  formData.append("apikey", apiKey);
+  formData.append("file", blob, "report.pdf");
+  formData.append("language", "eng");
+  formData.append("isOverlayRequired", "false");
 
   const res = await fetch("https://api.ocr.space/parse/image", {
     method: "POST",
-    body: form,
+    body: formData,
   });
 
   if (!res.ok) {
-    throw new Error(`OCR API error: ${res.status}`);
+    throw new Error(`OCR API error: HTTP ${res.status}`);
   }
 
   const data = await res.json();
 
   if (data.OCRExitCode !== 1 || !data.ParsedResults || !data.ParsedResults.length) {
-    console.error("OCR response issue:", data);
     throw new Error("OCR did not return parsed text");
   }
 
@@ -51,7 +52,7 @@ async function performOcrOnPdf(filePath) {
   return parsedText;
 }
 
-// --- AI Parser: send extracted text to OpenAI and get structured JSON ---
+// --- AI parser using OpenAI Responses API ---
 async function analyzeWithAI(extractedText) {
   if (!process.env.OPENAI_API_KEY) {
     throw new Error("OPENAI_API_KEY not configured");
@@ -86,15 +87,14 @@ Return STRICT JSON with this schema (no extra fields):
   },
   "loans": [
     {
-      "type": string,     // e.g. "Home Loan", "Personal Loan", "Credit Card", "Auto Loan", "OD"
-      "status": string,   // e.g. "Active", "Closed", "Settled", "Written Off"
-      "line": string      // short snippet from the report that describes this account
+      "type": string,
+      "status": string,
+      "line": string
     }
   ]
 }
 
 If something is missing in the text, put 0 or null accordingly.
-Now analyse this bureau report text and fill the JSON:
 
 ================= REPORT TEXT START =================
 ${extractedText}
@@ -102,32 +102,21 @@ ${extractedText}
 `;
 
   const response = await openai.responses.create({
-    model: "gpt-4.1-mini", // or another GPT-4.x model you prefer
-    input: [
-      {
-        role: "user",
-        content: [
-          {
-            type: "input_text",
-            text: prompt,
-          },
-        ],
-      },
-    ],
+    model: "gpt-4.1-mini",
+    input: prompt,
     response_format: { type: "json_object" },
   });
 
-  // The SDK returns the model's JSON as text in the first output block
-  const rawText = response.output[0].content[0].text;
+  const raw = response.output[0].content[0].text;
   let parsed;
+
   try {
-    parsed = JSON.parse(rawText);
+    parsed = JSON.parse(raw);
   } catch (e) {
-    console.error("Error parsing AI JSON:", e, rawText);
+    console.error("Error parsing AI JSON:", e, raw);
     throw new Error("AI parser returned invalid JSON");
   }
 
-  // Basic sanity defaults
   parsed.score = parsed.score ?? null;
   parsed.enquiryCount = parsed.enquiryCount ?? 0;
   parsed.dpd = parsed.dpd || "0 - Clean";
@@ -146,6 +135,13 @@ ${extractedText}
 app.post("/analyze", upload.single("pdf"), async (req, res) => {
   let filePath;
   try {
+    if (!req.file) {
+      return res.json({
+        success: false,
+        message: "No PDF file received.",
+      });
+    }
+
     filePath = req.file.path;
 
     const dataBuffer = fs.readFileSync(filePath);
@@ -154,7 +150,7 @@ app.post("/analyze", upload.single("pdf"), async (req, res) => {
 
     console.log("Initial extracted text length:", extractedText.length);
 
-    // If very little text, try OCR
+    // If very little text (likely scanned), use OCR
     if (!extractedText || extractedText.trim().length < 300) {
       console.log("Text too short, attempting OCR...");
       try {
@@ -165,7 +161,7 @@ app.post("/analyze", upload.single("pdf"), async (req, res) => {
         return res.json({
           success: false,
           message:
-            "We could not read this report automatically. Please upload the original PDF downloaded from the credit bureau website (not a photo or screenshot).",
+            "We could not read this report automatically (OCR failed). Please upload the original PDF downloaded from the bureau website (not a photo or screenshot).",
         });
       }
     }
@@ -178,8 +174,17 @@ app.post("/analyze", upload.single("pdf"), async (req, res) => {
       });
     }
 
-    // 🔥 NEW: Use AI to interpret the bureau text and compute score + totals
-    const aiResult = await analyzeWithAI(extractedText);
+    // Use AI to interpret the text
+    let aiResult;
+    try {
+      aiResult = await analyzeWithAI(extractedText);
+    } catch (aiErr) {
+      console.error("AI parsing failed:", aiErr);
+      return res.json({
+        success: false,
+        message: "AI parsing error: " + aiErr.message,
+      });
+    }
 
     res.json({
       success: true,
@@ -187,7 +192,7 @@ app.post("/analyze", upload.single("pdf"), async (req, res) => {
       result: aiResult,
     });
   } catch (err) {
-    console.error(err);
+    console.error("Unexpected error in /analyze:", err);
     res.status(500).json({
       success: false,
       message: "Error parsing PDF",
