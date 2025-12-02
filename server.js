@@ -1,5 +1,5 @@
 /* ===========================================================
-   KALKI FINSERV – AI BUREAU PARSER BACKEND (ROBUST VERSION)
+   KALKI FINSERV – AI BUREAU PARSER BACKEND (SINGLE AI CALL)
    =========================================================== */
 
 import express from "express";
@@ -33,7 +33,6 @@ function parseAmount(str) {
 async function performOcrOnPdf(filePath) {
   const apiKey = process.env.OCR_SPACE_API_KEY;
   if (!apiKey) {
-    // Do NOT crash API if OCR key not present
     console.warn("OCR_SPACE_API_KEY not configured – skipping OCR");
     return "";
   }
@@ -97,14 +96,19 @@ You are an expert reader of Indian credit bureau reports (Experian/CIBIL/CRIF/Eq
 
 Extract the following strictly in JSON:
 
-1) score — main bureau score only  
-2) enquiryCount  
-3) dpd — summary of overdues  
-4) loans[] — include details from "CREDIT ACCOUNT INFORMATION DETAILS"  
-5) enquiries[] — from "CREDIT ENQUIRIES"  
-6) totals — rough values (backend overrides later)
+1) score — the main bureau score only.
+2) enquiryCount — total credit enquiries.
+3) dpd — a short summary of delinquencies / overdues.
+4) loans[] — one item per credit facility, using:
+   - "SUMMARY: CREDIT ACCOUNT INFORMATION"
+   - "CREDIT ACCOUNT INFORMATION DETAILS"
+5) enquiries[] — from "CREDIT ENQUIRIES".
+6) totals — rough values (backend/frontend may override parts).
 
-The JSON format MUST MATCH this schema exactly:
+For each loan, include a "details" object. For dpdHistory, output a compact month/year view like:
+"2023-01: 30, 2023-03: 60" or "" if none.
+
+STRICT JSON shape:
 
 {
   "score": number,
@@ -304,61 +308,6 @@ ${extractedText}
 }
 
 // =====================================================
-// AI — SUM OF ACTIVE "Sanction Amt / Highest Credit"
-// =====================================================
-async function computeSanctionTotalActiveWithAI(extractedText) {
-  if (!process.env.OPENAI_API_KEY) {
-    throw new Error("OPENAI_API_KEY missing");
-  }
-
-  const lower = extractedText.toLowerCase();
-  const marker = "summary: credit account information";
-  const idx = lower.indexOf(marker);
-
-  const block = idx !== -1
-    ? extractedText.slice(idx, idx + 6000)
-    : extractedText;
-
-  const prompt = `
-Read ONLY this credit account summary.
-
-Extract: totalSanctionedActive = sum of "Sanction Amt / Highest Credit" for ACTIVE accounts only.
-
-Return ONLY:
-
-{"totalSanctionedActive": number}
-
-TEXT:
-${block}
-`;
-
-  const response = await openai.responses.create({
-    model: "gpt-4.1-mini",
-    input: prompt,
-    text: {
-      format: {
-        type: "json_schema",
-        name: "sanction_sum",
-        strict: true,
-        schema: {
-          type: "object",
-          properties: {
-            totalSanctionedActive: { type: "number" },
-          },
-          required: ["totalSanctionedActive"],
-          additionalProperties: false,
-        },
-      },
-    },
-  });
-
-  const raw = response.output[0].content[0].text;
-  let parsed = JSON.parse(raw);
-
-  return parseAmount(parsed.totalSanctionedActive);
-}
-
-// =====================================================
 // MAIN ENDPOINT: /analyze
 // =====================================================
 app.post("/analyze", upload.single("pdf"), async (req, res) => {
@@ -389,7 +338,7 @@ app.post("/analyze", upload.single("pdf"), async (req, res) => {
         }
       } catch (ocrErr) {
         console.error("OCR Error:", ocrErr);
-        // We continue with whatever pdf-parse gave us (may still be enough)
+        // Continue with whatever pdf-parse gave us
       }
     }
 
@@ -407,10 +356,17 @@ app.post("/analyze", upload.single("pdf"), async (req, res) => {
       ai = await analyzeWithAI(extractedText);
     } catch (aiErr) {
       console.error("AI parsing error:", aiErr);
-      const msg =
+      let msg =
         aiErr.response?.data?.error?.message ||
         aiErr.message ||
         "Unknown AI error";
+
+      // Make rate-limit error more friendly
+      if (msg.includes("Rate limit")) {
+        msg =
+          "Our AI engine is temporarily busy. Please wait 20–30 seconds and try again.";
+      }
+
       return res.json({
         success: false,
         message: "AI parsing error: " + msg,
@@ -420,19 +376,14 @@ app.post("/analyze", upload.single("pdf"), async (req, res) => {
     // 2) Override OUTSTANDING total with Total Current Bal. amt
     const totalCurrentBal = extractTotalCurrentBalance(extractedText);
     if (!ai.totals) ai.totals = {};
-    ai.totals.loanOutstanding = totalCurrentBal || ai.totals.loanOutstanding || 0;
+    ai.totals.loanOutstanding =
+      totalCurrentBal || ai.totals.loanOutstanding || 0;
 
-    // 3) Override SANCTIONED from ACTIVE accounts
-    try {
-      const sanctionActive = await computeSanctionTotalActiveWithAI(
-        extractedText
-      );
-      ai.totals.loanSanctioned =
-        sanctionActive || ai.totals.loanSanctioned || 0;
-    } catch (sanErr) {
-      console.error("Sanction sum error:", sanErr);
-      ai.totals.loanSanctioned = ai.totals.loanSanctioned || 0;
-    }
+    // NOTE:
+    // We no longer do a second AI call for sanctioned sum.
+    // Frontend already computes:
+    //  - Sanctioned = sum of sanctionAmount for ACTIVE loans (from ai.loans.details)
+    //  - Credit card totals from ACTIVE credit card accounts.
 
     res.json({
       success: true,
