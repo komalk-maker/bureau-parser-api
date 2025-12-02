@@ -68,7 +68,7 @@ function extractTotalCurrentBalance(text) {
   const t = text.replace(/\r/g, "").replace(/\u00a0/g, " ");
   const patterns = [
     /Total\s+Current\s+Bal\.?\s*amt[^\d]{0,30}([\d,]+)/i,
-    /Total\s+Current\s+Balance[^\d]{0,30}([\d,]+)/i
+    /Total\s+Current\s+Balance[^\d]{0,30}([\d,]+)/i,
   ];
 
   for (const re of patterns) {
@@ -82,7 +82,7 @@ function extractTotalCurrentBalance(text) {
 
 // ==============================================
 // AI PARSER – SCORE, ENQUIRIES, LOANS, DPD, ROUGH TOTALS
-// (We override totals later deterministically)
+// (Totals will be overridden later)
 // ==============================================
 async function analyzeWithAI(extractedText) {
   if (!process.env.OPENAI_API_KEY) {
@@ -170,15 +170,15 @@ ${extractedText}
                 loanSanctioned: { type: "number" },
                 loanOutstanding: { type: "number" },
                 cardLimit: { type: "number" },
-                cardOutstanding: { type: "number" }
+                cardOutstanding: { type: "number" },
               },
               required: [
                 "loanSanctioned",
                 "loanOutstanding",
                 "cardLimit",
-                "cardOutstanding"
+                "cardOutstanding",
               ],
-              additionalProperties: false
+              additionalProperties: false,
             },
             loans: {
               type: "array",
@@ -187,18 +187,18 @@ ${extractedText}
                 properties: {
                   type: { type: "string" },
                   status: { type: "string" },
-                  line: { type: "string" }
+                  line: { type: "string" },
                 },
                 required: ["type", "status", "line"],
-                additionalProperties: false
-              }
-            }
+                additionalProperties: false,
+              },
+            },
           },
           required: ["score", "enquiryCount", "dpd", "totals", "loans"],
-          additionalProperties: false
-        }
-      }
-    }
+          additionalProperties: false,
+        },
+      },
+    },
   });
 
   const raw = response.output[0].content[0].text;
@@ -212,7 +212,8 @@ ${extractedText}
   }
 
   parsed.score = typeof parsed.score === "number" ? parsed.score : 0;
-  parsed.enquiryCount = typeof parsed.enquiryCount === "number" ? parsed.enquiryCount : 0;
+  parsed.enquiryCount =
+    typeof parsed.enquiryCount === "number" ? parsed.enquiryCount : 0;
   parsed.dpd = parsed.dpd || "0 - Clean";
 
   if (!parsed.totals) {
@@ -235,64 +236,62 @@ ${extractedText}
 }
 
 // ==============================================
-// AI HELPER – SUM "Sanction Amt / Highest Credit" COLUMN
+// AI HELPER – SUM "Sanction Amt / Highest Credit" FOR ACTIVE ONLY
 // FROM "SUMMARY: CREDIT ACCOUNT INFORMATION"
 // ==============================================
-async function computeSanctionTotalWithAI(extractedText) {
+async function computeSanctionTotalActiveWithAI(extractedText) {
   if (!process.env.OPENAI_API_KEY) {
     throw new Error("OPENAI_API_KEY missing");
   }
 
-  // Extract only the SUMMARY: CREDIT ACCOUNT INFORMATION block
+  // Locate the SUMMARY: CREDIT ACCOUNT INFORMATION block
   const lower = extractedText.toLowerCase();
-  const startIdx = lower.indexOf("summary: credit account information".toLowerCase());
-  if (startIdx === -1) {
-    // Fallback: just let AI approximate on the whole text
+  const marker = "summary: credit account information";
+  const startIdx = lower.indexOf(marker);
+  let summaryBlock;
+
+  if (startIdx !== -1) {
+    // take a generous slice after the marker (e.g. next 6000 chars)
+    summaryBlock = extractedText.slice(startIdx, startIdx + 6000);
+  } else {
+    // fallback: use whole text (AI will do its best)
     console.warn("Could not locate 'SUMMARY: CREDIT ACCOUNT INFORMATION' block");
+    summaryBlock = extractedText;
   }
-  const afterStart = startIdx !== -1 ? extractedText.slice(startIdx) : extractedText;
-
-  // Cut until a next big section heading to narrow focus
-  const stopMarkers = [
-    "REPORT SUMMARY",
-    "Current Balance Amount Summary",
-    "Credit Enquiry Summary",
-    "ENQUIRY INFORMATION"
-  ].map(s => s.toLowerCase());
-
-  let endIdx = afterStart.length;
-  for (const marker of stopMarkers) {
-    const idx = afterStart.toLowerCase().indexOf(marker);
-    if (idx !== -1 && idx > 0 && idx < endIdx) {
-      endIdx = idx;
-    }
-  }
-
-  const summaryBlock = afterStart.slice(0, endIdx);
 
   const prompt = `
-You will be given ONLY the "SUMMARY: CREDIT ACCOUNT INFORMATION" section (and nearby text)
-from an Indian Experian-style bureau report. The table has a column named:
+You are reading the "SUMMARY: CREDIT ACCOUNT INFORMATION" table from an Experian-style bureau report.
 
-  "Sanction Amt / Highest Credit"
+The columns include (in some order):
+- Lender
+- Account type
+- Account No
+- Ownership
+- Date Reported
+- Account Status
+- Date Opened
+- Sanction Amt / Highest Credit
+- Current Balance
+- Amount Overdue
 
-Your job:
+Your TASK:
 
-1. Identify each CREDIT ACCOUNT row (both ACTIVE and CLOSED).
-2. For each row, read the numeric value in the column "Sanction Amt / Highest Credit".
-3. Sum ALL those values (including closed accounts, active accounts, secured, unsecured, cards, etc.).
-4. Ignore rows that do not have a proper numeric amount for this column.
+1. Consider ONLY rows where **Account Status is "ACTIVE"**.
+2. For each ACTIVE row, read the numeric value in the **"Sanction Amt / Highest Credit"** column.
+3. Sum all those values (active accounts only).
+4. Ignore CLOSED / SETTLED / WRITTEN-OFF rows completely (do NOT include them in the sum).
+5. Parse Indian-style amounts like "7,50,000" or "33,25,000" correctly.
 
-Return STRICT JSON:
+Return STRICT JSON only:
 
 {
-  "totalSanctioned": number
+  "totalSanctionedActive": number
 }
 
 Rules:
-- Parse numbers like "40,88,632" correctly (Indian commas).
-- If you are not sure about a row, skip it rather than guessing.
-- If you cannot find any such column or amounts, return 0.
+- If you are unsure about a row, skip it rather than guessing.
+- If you cannot find any ACTIVE rows or sanction amounts, return 0.
+- Do NOT include any explanation text, just the JSON.
 
 Here is the text block:
 
@@ -305,18 +304,18 @@ ${summaryBlock}
     text: {
       format: {
         type: "json_schema",
-        name: "sanction_total",
+        name: "sanction_total_active",
         strict: true,
         schema: {
           type: "object",
           properties: {
-            totalSanctioned: { type: "number" }
+            totalSanctionedActive: { type: "number" },
           },
-          required: ["totalSanctioned"],
-          additionalProperties: false
-        }
-      }
-    }
+          required: ["totalSanctionedActive"],
+          additionalProperties: false,
+        },
+      },
+    },
   });
 
   const raw = response.output[0].content[0].text;
@@ -324,11 +323,11 @@ ${summaryBlock}
   try {
     parsed = JSON.parse(raw);
   } catch (e) {
-    console.error("SanctionTotal AI JSON Error:", raw);
+    console.error("SanctionTotalActive AI JSON Error:", raw);
     throw new Error("AI returned invalid JSON for sanction total");
   }
 
-  return parseAmount(parsed.totalSanctioned);
+  return parseAmount(parsed.totalSanctionedActive);
 }
 
 // ==============================================
@@ -374,7 +373,7 @@ app.post("/analyze", upload.single("pdf"), async (req, res) => {
       });
     }
 
-    // Run AI interpretation (score, loans, enquiries, dpd, rough totals)
+    // 1) Run AI interpretation (score, loans, enquiries, dpd, rough totals)
     let aiResult;
     try {
       aiResult = await analyzeWithAI(extractedText);
@@ -388,26 +387,30 @@ app.post("/analyze", upload.single("pdf"), async (req, res) => {
 
     if (!aiResult.totals) aiResult.totals = {};
 
-    // 1️⃣ Total Debt O/s (O/s) = Total Current Bal. amt from summary
+    // 2) Total Debt O/s (O/s) = Total Current Bal. amt from summary
     const totalCurrentBal = extractTotalCurrentBalance(extractedText);
     if (totalCurrentBal) {
       aiResult.totals.loanOutstanding = totalCurrentBal;
     } else {
-      aiResult.totals.loanOutstanding = aiResult.totals.loanOutstanding || 0;
+      aiResult.totals.loanOutstanding =
+        aiResult.totals.loanOutstanding || 0;
     }
 
-    // 2️⃣ Total Debt O/s (Sanctioned) = sum of "Sanction Amt / Highest Credit" column via AI on summary table
+    // 3) Total Debt O/s (Sanctioned) = sum of "Sanction Amt / Highest Credit" for ACTIVE accounts only
     try {
-      const sanctionTotal = await computeSanctionTotalWithAI(extractedText);
-      if (sanctionTotal) {
-        aiResult.totals.loanSanctioned = sanctionTotal;
+      const sanctionTotalActive = await computeSanctionTotalActiveWithAI(
+        extractedText
+      );
+      if (sanctionTotalActive) {
+        aiResult.totals.loanSanctioned = sanctionTotalActive;
       } else {
-        aiResult.totals.loanSanctioned = aiResult.totals.loanSanctioned || 0;
+        aiResult.totals.loanSanctioned =
+          aiResult.totals.loanSanctioned || 0;
       }
     } catch (sanErr) {
-      console.error("Sanction sum AI error:", sanErr);
-      // fall back to whatever AI gave earlier or 0
-      aiResult.totals.loanSanctioned = aiResult.totals.loanSanctioned || 0;
+      console.error("Sanction sum (ACTIVE) AI error:", sanErr);
+      aiResult.totals.loanSanctioned =
+        aiResult.totals.loanSanctioned || 0;
     }
 
     res.json({
@@ -415,7 +418,6 @@ app.post("/analyze", upload.single("pdf"), async (req, res) => {
       message: "PDF parsed successfully",
       result: aiResult,
     });
-
   } catch (err) {
     console.error("Fatal Error:", err);
     return res.status(500).json({
