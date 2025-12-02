@@ -1,6 +1,6 @@
-// ================================
-// KALKI FINSERV – AI BUREAU PARSER BACKEND
-// ================================
+/* ===========================================================
+   KALKI FINSERV – AI BUREAU PARSER BACKEND (FULL WORKING FILE)
+   =========================================================== */
 
 import express from "express";
 import multer from "multer";
@@ -21,7 +21,7 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-// --------- Helpers ----------
+// ---------- Utility Helpers ----------
 function parseAmount(str) {
   if (!str) return 0;
   const cleaned = String(str).replace(/[^0-9.-]/g, "");
@@ -29,9 +29,7 @@ function parseAmount(str) {
   return Number.isFinite(num) ? num : 0;
 }
 
-// ==============================================
-// OCR SPACE (for scanned PDFs)
-// ==============================================
+// ---------- OCR SPACE ----------
 async function performOcrOnPdf(filePath) {
   const apiKey = process.env.OCR_SPACE_API_KEY;
   if (!apiKey) throw new Error("OCR_SPACE_API_KEY not configured");
@@ -41,30 +39,27 @@ async function performOcrOnPdf(filePath) {
 
   const formData = new FormData();
   formData.append("apikey", apiKey);
-  formData.append("file", blob, "report.pdf");
+  formData.append("file", blob, "bureau.pdf");
   formData.append("language", "eng");
-  formData.append("isOverlayRequired", "false");
 
   const res = await fetch("https://api.ocr.space/parse/image", {
     method: "POST",
     body: formData,
   });
 
-  if (!res.ok) throw new Error("OCR API error: " + res.status);
   const data = await res.json();
 
   if (data.OCRExitCode !== 1 || !data.ParsedResults?.length) {
-    throw new Error("OCR did not return parsed text");
+    throw new Error("OCR failed");
   }
 
-  return data.ParsedResults.map((r) => r.ParsedText || "").join("\n");
+  return data.ParsedResults.map(r => r.ParsedText || "").join("\n");
 }
 
-// ==============================================
-// EXPERIAN: TOTAL CURRENT BALANCE (for O/s)
-// ==============================================
+// ---------- Extract Total Current Bal. amt ----------
 function extractTotalCurrentBalance(text) {
   const t = text.replace(/\r/g, "").replace(/\u00a0/g, " ");
+
   const patterns = [
     /Total\s+Current\s+Bal\.?\s*amt[^\d]{0,30}([\d,]+)/i,
     /Total\s+Current\s+Balance[^\d]{0,30}([\d,]+)/i,
@@ -72,85 +67,29 @@ function extractTotalCurrentBalance(text) {
 
   for (const re of patterns) {
     const m = t.match(re);
-    if (m && m[1]) {
-      return parseAmount(m[1]);
-    }
+    if (m && m[1]) return parseAmount(m[1]);
   }
+
   return 0;
 }
 
-// ==============================================
-// AI PARSER – SCORE, ENQUIRIES, LOANS (WITH DETAILS), ROUGH TOTALS
-// ==============================================
+// =====================================================
+// AI PARSER — SCORE, LOANS (WITH DETAILS), ENQUIRIES
+// =====================================================
 async function analyzeWithAI(extractedText) {
-  if (!process.env.OPENAI_API_KEY) {
-    throw new Error("OPENAI_API_KEY missing");
-  }
-
   const prompt = `
-You are an expert at reading INDIAN credit bureau reports (Experian, CIBIL, CRIF, Equifax).
+You are an expert reader of Indian credit bureau reports (Experian/CIBIL/CRIF/Equifax).
 
-You will be given the FULL TEXT of a bureau report (tables flattened as text).
-Read it like a human and extract exactly the following fields:
+Extract the following strictly in JSON:
 
-1) score
-   - The MAIN credit score shown in the score section (e.g. Experian Credit Score 750).
-   - This is usually printed once near a gauge and the text "Credit Score" or "Experian Credit Score".
-   - Ignore any other 3-digit numbers or ranges.
-   - If you cannot find it, use 0.
+1) score — main bureau score only  
+2) enquiryCount  
+3) dpd — summary of overdues  
+4) loans[] — include details from "CREDIT ACCOUNT INFORMATION DETAILS"  
+5) enquiries[] — from "CREDIT ENQUIRIES"  
+6) totals — rough values (backend overrides later)
 
-2) enquiryCount
-   - Total number of credit enquiries.
-   - Prefer any "Credit Enquiry Summary" / "Last 180 days credit enquiries" / "Total credit enquiries" section.
-   - If not present, count the number of enquiry rows in enquiry tables.
-   - If unclear, use 0.
-
-3) dpd
-   - A short text summary of delinquencies / overdues / DPD.
-   - If the report or summary says it's clean, return exactly "0 - Clean".
-   - Example: "30+ DPD in 1 account", "No DPD in last 24 months", etc.
-
-4) loans
-   - This comes primarily from the sections:
-       "SUMMARY: CREDIT ACCOUNT INFORMATION" and
-       "CREDIT ACCOUNT INFORMATION DETAILS" (or similar names).
-   - Return one item per credit facility (loan / card / OD / LAP etc).
-   - Each item has:
-       - type: high-level type such as "Home Loan", "LAP", "Personal Loan", "Auto Loan", "Credit Card", "OD", etc.
-       - status: e.g. "Active", "Closed", "Settled", "Written Off".
-       - line: a short one-line description for display (e.g. "HDFC Bank • Home Loan • ACTIVE").
-       - details: object with as many of the following fields as you can fill from "CREDIT ACCOUNT INFORMATION DETAILS":
-           * lender
-           * accountType
-           * accountNumber
-           * ownership
-           * accountStatus
-           * dateOpened
-           * dateReported
-           * dateClosed
-           * sanctionAmount         (numeric, no commas)
-           * currentBalance         (numeric, no commas)
-           * amountOverdue          (numeric, no commas)
-           * emiAmount              (numeric, no commas)
-           * securityOrCollateral   (string if present)
-           * dpdHistory             (string summary, e.g. "No DPD in last 24 months")
-
-5) enquiries
-   - From the "CREDIT ENQUIRIES" section.
-   - Each enquiry item should have:
-       - institution: name of the lender/bank/NBFC.
-       - enquiryType: e.g. "Credit Card", "Personal Loan", "Auto Loan", etc.
-       - date: enquiry date as it appears (e.g. "15-11-2025" or "2025-11-15").
-       - amount: enquiry amount if present (numeric, no commas).
-       - status: e.g. "Approved", "Pending", "Rejected" if visible, otherwise "".
-
-6) totals
-   - Just give a reasonable approximation of:
-       loanSanctioned, loanOutstanding, cardLimit, cardOutstanding.
-   - The backend will override some of these with deterministic logic from the raw text.
-   - Always return numeric values (no commas).
-
-Return STRICT JSON (no comments, no extra fields):
+The JSON format MUST MATCH this schema exactly:
 
 {
   "score": number,
@@ -226,9 +165,9 @@ ${extractedText}
                 "loanSanctioned",
                 "loanOutstanding",
                 "cardLimit",
-                "cardOutstanding",
+                "cardOutstanding"
               ],
-              additionalProperties: false,
+              additionalProperties: false
             },
             loans: {
               type: "array",
@@ -254,14 +193,30 @@ ${extractedText}
                       amountOverdue: { type: "number" },
                       emiAmount: { type: "number" },
                       securityOrCollateral: { type: "string" },
-                      dpdHistory: { type: "string" },
+                      dpdHistory: { type: "string" }
                     },
-                    additionalProperties: false,
-                  },
+                    required: [
+                      "lender",
+                      "accountType",
+                      "accountNumber",
+                      "ownership",
+                      "accountStatus",
+                      "dateOpened",
+                      "dateReported",
+                      "dateClosed",
+                      "sanctionAmount",
+                      "currentBalance",
+                      "amountOverdue",
+                      "emiAmount",
+                      "securityOrCollateral",
+                      "dpdHistory"
+                    ],
+                    additionalProperties: false
+                  }
                 },
-                required: ["type", "status", "line"],
-                additionalProperties: false,
-              },
+                required: ["type", "status", "line", "details"],
+                additionalProperties: false
+              }
             },
             enquiries: {
               type: "array",
@@ -272,18 +227,18 @@ ${extractedText}
                   enquiryType: { type: "string" },
                   date: { type: "string" },
                   amount: { type: "number" },
-                  status: { type: "string" },
+                  status: { type: "string" }
                 },
                 required: [
                   "institution",
                   "enquiryType",
                   "date",
                   "amount",
-                  "status",
+                  "status"
                 ],
-                additionalProperties: false,
-              },
-            },
+                additionalProperties: false
+              }
+            }
           },
           required: [
             "score",
@@ -291,117 +246,48 @@ ${extractedText}
             "dpd",
             "totals",
             "loans",
-            "enquiries",
+            "enquiries"
           ],
-          additionalProperties: false,
-        },
-      },
-    },
+          additionalProperties: false
+        }
+      }
+    }
   });
 
   const raw = response.output[0].content[0].text;
+  let parsed = JSON.parse(raw);
 
-  let parsed;
-  try {
-    parsed = JSON.parse(raw);
-  } catch (e) {
-    console.error("AI JSON Error:", raw);
-    throw new Error("AI returned invalid JSON");
-  }
-
-  // Normalise / defaults
-  parsed.score = typeof parsed.score === "number" ? parsed.score : 0;
-  parsed.enquiryCount =
-    typeof parsed.enquiryCount === "number" ? parsed.enquiryCount : 0;
-  parsed.dpd = parsed.dpd || "0 - Clean";
-
-  if (!parsed.totals) {
-    parsed.totals = {
-      loanSanctioned: 0,
-      loanOutstanding: 0,
-      cardLimit: 0,
-      cardOutstanding: 0,
-    };
-  }
-
-  parsed.totals.loanSanctioned = parseAmount(parsed.totals.loanSanctioned);
-  parsed.totals.loanOutstanding = parseAmount(parsed.totals.loanOutstanding);
-  parsed.totals.cardLimit = parseAmount(parsed.totals.cardLimit);
-  parsed.totals.cardOutstanding = parseAmount(parsed.totals.cardOutstanding);
-
-  parsed.loans = Array.isArray(parsed.loans) ? parsed.loans : [];
-  parsed.enquiries = Array.isArray(parsed.enquiries) ? parsed.enquiries : [];
-
-  // Ensure each loan has a details object
-  parsed.loans = parsed.loans.map((l) => ({
-    ...l,
-    details: l.details || {},
-  }));
+  // Normalize
+  parsed.score ||= 0;
+  parsed.enquiryCount ||= 0;
+  parsed.dpd ||= "0 - Clean";
 
   return parsed;
 }
 
-// ==============================================
-// AI HELPER – SUM "Sanction Amt / Highest Credit" FOR ACTIVE ONLY
-// FROM "SUMMARY: CREDIT ACCOUNT INFORMATION"
-// ==============================================
+// =====================================================
+// AI — SUM OF ACTIVE "Sanction Amt / Highest Credit"
+// =====================================================
 async function computeSanctionTotalActiveWithAI(extractedText) {
-  if (!process.env.OPENAI_API_KEY) {
-    throw new Error("OPENAI_API_KEY missing");
-  }
-
-  // Locate the SUMMARY: CREDIT ACCOUNT INFORMATION block
   const lower = extractedText.toLowerCase();
   const marker = "summary: credit account information";
-  const startIdx = lower.indexOf(marker);
-  let summaryBlock;
+  const idx = lower.indexOf(marker);
 
-  if (startIdx !== -1) {
-    // take a generous slice after the marker (e.g. next 6000 chars)
-    summaryBlock = extractedText.slice(startIdx, startIdx + 6000);
-  } else {
-    // fallback: use whole text
-    console.warn("Could not locate 'SUMMARY: CREDIT ACCOUNT INFORMATION' block");
-    summaryBlock = extractedText;
-  }
+  const block = idx !== -1
+    ? extractedText.slice(idx, idx + 6000)
+    : extractedText;
 
   const prompt = `
-You are reading the "SUMMARY: CREDIT ACCOUNT INFORMATION" table from an Experian-style bureau report.
+Read ONLY this credit account summary.
 
-The columns include (in some order):
-- Lender
-- Account type
-- Account No
-- Ownership
-- Date Reported
-- Account Status
-- Date Opened
-- Sanction Amt / Highest Credit
-- Current Balance
-- Amount Overdue
+Extract: totalSanctionedActive = sum of "Sanction Amt / Highest Credit" for ACTIVE accounts only.
 
-Your TASK:
+Return ONLY:
 
-1. Consider ONLY rows where **Account Status is "ACTIVE"**.
-2. For each ACTIVE row, read the numeric value in the **"Sanction Amt / Highest Credit"** column.
-3. Sum all those values (active accounts only).
-4. Ignore CLOSED / SETTLED / WRITTEN-OFF rows completely.
-5. Parse Indian-style amounts like "7,50,000" or "33,25,000" correctly.
+{"totalSanctionedActive": number}
 
-Return STRICT JSON only:
-
-{
-  "totalSanctionedActive": number
-}
-
-Rules:
-- If you are unsure about a row, skip it rather than guessing.
-- If you cannot find any ACTIVE rows or sanction amounts, return 0.
-- Do NOT include any explanation text, just the JSON.
-
-Here is the text block:
-
-${summaryBlock}
+TEXT:
+${block}
 `;
 
   const response = await openai.responses.create({
@@ -410,142 +296,73 @@ ${summaryBlock}
     text: {
       format: {
         type: "json_schema",
-        name: "sanction_total_active",
+        name: "sanction_sum",
         strict: true,
         schema: {
           type: "object",
           properties: {
-            totalSanctionedActive: { type: "number" },
+            totalSanctionedActive: { type: "number" }
           },
           required: ["totalSanctionedActive"],
-          additionalProperties: false,
-        },
-      },
-    },
+          additionalProperties: false
+        }
+      }
+    }
   });
 
   const raw = response.output[0].content[0].text;
-  let parsed;
-  try {
-    parsed = JSON.parse(raw);
-  } catch (e) {
-    console.error("SanctionTotalActive AI JSON Error:", raw);
-    throw new Error("AI returned invalid JSON for sanction total");
-  }
+  let parsed = JSON.parse(raw);
 
   return parseAmount(parsed.totalSanctionedActive);
 }
 
-// ==============================================
-// MAIN API ENDPOINT: /analyze
-// ==============================================
+// =====================================================
+// MAIN ENDPOINT: /analyze
+// =====================================================
 app.post("/analyze", upload.single("pdf"), async (req, res) => {
   let filePath;
-
   try {
-    if (!req.file) {
-      return res.json({ success: false, message: "No PDF received." });
-    }
+    if (!req.file) return res.json({ success: false, message: "No PDF provided" });
 
     filePath = req.file.path;
 
-    const dataBuffer = fs.readFileSync(filePath);
-    const pdfData = await pdf(dataBuffer);
-    let extractedText = pdfData.text || "";
+    let extractedText = (await pdf(fs.readFileSync(filePath))).text || "";
 
-    console.log("Initial text length:", extractedText.length);
-
-    // If text is very short, assume scanned PDF → OCR
-    if (!extractedText || extractedText.trim().length < 300) {
-      console.log("Running OCR...");
-      try {
-        extractedText = await performOcrOnPdf(filePath);
-        console.log("OCR text length:", extractedText.length);
-      } catch (ocrErr) {
-        console.error("OCR Error:", ocrErr);
-        return res.json({
-          success: false,
-          message:
-            "OCR failed. Please upload the original bureau PDF (not a photo or screenshot).",
-        });
-      }
+    // If PDF text too short → OCR
+    if (extractedText.trim().length < 300) {
+      extractedText = await performOcrOnPdf(filePath);
     }
 
-    if (!extractedText || extractedText.trim().length < 100) {
-      return res.json({
-        success: false,
-        message:
-          "Unreadable PDF. Please upload a clearer report downloaded directly from the bureau.",
-      });
+    if (extractedText.trim().length < 100) {
+      return res.json({ success: false, message: "Unreadable PDF" });
     }
 
-    // 1) Run AI interpretation (score, loans + details, enquiries, rough totals)
-    let aiResult;
-    try {
-      aiResult = await analyzeWithAI(extractedText);
-    } catch (aiErr) {
-      console.error("AI ERROR:", aiErr);
-      return res.json({
-        success: false,
-        message: "AI parsing error: " + aiErr.message,
-      });
-    }
+    // 1) AI extraction: score / loans / enquiries / rough totals
+    const ai = await analyzeWithAI(extractedText);
 
-    if (!aiResult.totals) aiResult.totals = {};
+    // 2) Override OUTSTANDING total
+    ai.totals.loanOutstanding = extractTotalCurrentBalance(extractedText);
 
-    // 2) Total Debt O/s (O/s) = Total Current Bal. amt from summary
-    const totalCurrentBal = extractTotalCurrentBalance(extractedText);
-    if (totalCurrentBal) {
-      aiResult.totals.loanOutstanding = totalCurrentBal;
-    } else {
-      aiResult.totals.loanOutstanding =
-        aiResult.totals.loanOutstanding || 0;
-    }
+    // 3) Override SANCTIONED from ACTIVE accounts
+    ai.totals.loanSanctioned =
+      await computeSanctionTotalActiveWithAI(extractedText);
 
-    // 3) Total Debt O/s (Sanctioned) = sum of "Sanction Amt / Highest Credit" for ACTIVE accounts only
-    try {
-      const sanctionTotalActive = await computeSanctionTotalActiveWithAI(
-        extractedText
-      );
-      if (sanctionTotalActive) {
-        aiResult.totals.loanSanctioned = sanctionTotalActive;
-      } else {
-        aiResult.totals.loanSanctioned =
-          aiResult.totals.loanSanctioned || 0;
-      }
-    } catch (sanErr) {
-      console.error("Sanction sum (ACTIVE) AI error:", sanErr);
-      aiResult.totals.loanSanctioned =
-        aiResult.totals.loanSanctioned || 0;
-    }
+    res.json({ success: true, message: "Parsed OK", result: ai });
 
-    res.json({
-      success: true,
-      message: "PDF parsed successfully",
-      result: aiResult,
-    });
-  } catch (err) {
-    console.error("Fatal Error:", err);
-    return res.status(500).json({
-      success: false,
-      message: "Error parsing PDF",
-    });
+  } catch (e) {
+    console.error(e);
+    res.json({ success: false, message: "Error parsing PDF" });
+
   } finally {
-    if (filePath) {
-      try {
-        fs.unlinkSync(filePath);
-      } catch (e) {
-        console.error("File cleanup error:", e);
-      }
-    }
+    if (filePath) fs.unlinkSync(filePath);
   }
 });
 
-// Home test route
-app.get("/", (req, res) => {
-  res.send("Bureau Parser API with AI is LIVE 🚀");
-});
+// ---------- Test Route ----------
+app.get("/", (req, res) =>
+  res.send("Kalki Finserv Bureau Parser API is LIVE 🚀")
+);
 
-// Server start
+// ---------- Start Server ----------
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+app.listen(PORT, () => console.log("Server running on", PORT));
