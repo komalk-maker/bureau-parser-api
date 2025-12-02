@@ -21,6 +21,14 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
+// Small helper: parse Indian-style amounts like "40,88,632"
+function parseAmount(str) {
+  if (!str) return 0;
+  const cleaned = String(str).replace(/[^0-9.-]/g, "");
+  const num = parseFloat(cleaned);
+  return Number.isFinite(num) ? num : 0;
+}
+
 // ==============================================
 // OCR SPACE (for scanned PDFs)
 // ==============================================
@@ -53,7 +61,71 @@ async function performOcrOnPdf(filePath) {
 }
 
 // ==============================================
-// AI PARSER – EXTRACT SCORE, LOANS, TOTALS, ETC.
+// EXPERIAN-SPECIFIC TOTALS FROM REPORT SUMMARY
+// ==============================================
+
+// Look for "REPORT SUMMARY" / "Current Balance Amount Summary" style totals
+function extractTotalsFromExperianSummary(text) {
+  const out = {};
+
+  // Normalise some spacing
+  const t = text.replace(/\r/g, "").replace(/\u00a0/g, " ");
+
+  // 1) Total Current Bal. amt  -> loanOutstanding (ALL accounts)
+  const totalCurrentMatch = t.match(
+    /Total\s+Current\s+Bal\.?\s*amt\s*([0-9,]+)/i
+  );
+  if (totalCurrentMatch) {
+    out.loanOutstanding = parseAmount(totalCurrentMatch[1]);
+  }
+
+  // 2) Optional card summaries (if Experian provides them in other sections)
+  //    These are best-effort; if not found, we won't override.
+  const cardLimitMatch = t.match(
+    /Total\s+(?:Credit\s*Card|CC(?:\/CO)?)\s+(?:High\s+Credit|Credit\s+Limit|Limit)\s*([0-9,]+)/i
+  );
+  if (cardLimitMatch) {
+    out.cardLimit = parseAmount(cardLimitMatch[1]);
+  }
+
+  const cardOutstandingMatch = t.match(
+    /Total\s+(?:Credit\s*Card|CC(?:\/CO)?)\s+(?:Current\s+Bal\.?|Outstanding|O\/s)\s*([0-9,]+)/i
+  );
+  if (cardOutstandingMatch) {
+    out.cardOutstanding = parseAmount(cardOutstandingMatch[1]);
+  }
+
+  return out;
+}
+
+// Given AI totals + raw text, override with Experian summary when available
+function overrideTotalsFromSummary(extractedText, originalTotals = {}) {
+  const base = {
+    loanSanctioned: parseAmount(originalTotals.loanSanctioned),
+    loanOutstanding: parseAmount(originalTotals.loanOutstanding),
+    cardLimit: parseAmount(originalTotals.cardLimit),
+    cardOutstanding: parseAmount(originalTotals.cardOutstanding),
+  };
+
+  const summary = extractTotalsFromExperianSummary(extractedText);
+
+  // Only override if we positively found a summary number
+  if (summary.loanOutstanding) {
+    base.loanOutstanding = summary.loanOutstanding;
+  }
+  if (summary.cardLimit) {
+    base.cardLimit = summary.cardLimit;
+  }
+  if (summary.cardOutstanding) {
+    base.cardOutstanding = summary.cardOutstanding;
+  }
+
+  return base;
+}
+
+// ==============================================
+// AI PARSER – EXTRACT SCORE, LOANS, ENQUIRIES, DPD
+// (Totals will be corrected afterwards with regex)
 // ==============================================
 async function analyzeWithAI(extractedText) {
   if (!process.env.OPENAI_API_KEY) {
@@ -83,57 +155,19 @@ Read it like a human and extract exactly the following fields:
    - If the report or summary says it's clean, return exactly "0 - Clean".
    - Example: "30+ DPD in 1 account", "No DPD in last 24 months", etc.
 
-4) totals
-   You MUST prioritise the summary boxes that bureaus provide.
-   DO NOT try to manually sum many lines if a summary is already present.
-
-   Specifically, for Experian:
-
-   - Look for sections named "REPORT SUMMARY" and "Current Balance Amount Summary".
-   - Inside that, look for:
-       "Total Current Bal. amt"  --> this is the TOTAL OUTSTANDING across all accounts.
-       "Secured Accounts amt"
-       "Unsecured Accounts amt"
-   - If "Total Current Bal. amt" exists, use that directly as the total outstanding across ALL accounts.
-
-   Fill the totals object as:
-
-   - loanOutstanding:
-       - Prefer:
-           * "Total Current Bal. amt" from the Current Balance Amount Summary (all accounts),
-         OR if that doesn't exist,
-           * Secured + Unsecured current balance amounts from the same summary,
-         OR if no summary exists,
-           * then approximate by summing outstanding/current balance of all TERM/LOAN accounts.
-       - Do NOT double count. Prefer the single summary number when available.
-
-   - loanSanctioned:
-       - Prefer any overall "Total Sanctioned Amount", "Total Disbursed Amount" or similar loan summary number.
-       - If there is a summary row for "Total Sanctioned Amt" or "Total Disbursed Amt" for all loans, use that.
-       - ONLY if no such summary exists, approximate by summing sanctioned/disbursed amounts of loan/OD/LAP accounts.
-
-   - cardLimit:
-       - Prefer summary values such as:
-           "Total Credit Card Limit", "Total CC/CO High Credit / Limit", or similar for credit card accounts.
-       - ONLY if no summary exists, approximate by summing the limits/high credit for all credit card accounts.
-
-   - cardOutstanding:
-       - Prefer summary values such as:
-           "Total Credit Card Current Balance", "Total CC/CO current balance" or similar.
-       - ONLY if no summary exists, approximate by summing current balance of all credit card accounts.
-
-   IMPORTANT:
-   - Always return numeric values as plain numbers (e.g. 4088632), NOT formatted with commas.
-   - If a particular total cannot be determined, set it to 0 (do NOT omit the field).
-
-5) loans
+4) loans
    - A concise list of credit facilities (loans and credit cards).
    - Each item:
        - type: e.g. "Home Loan", "LAP", "Personal Loan", "Auto Loan", "Credit Card", "OD", etc.
        - status: e.g. "Active", "Closed", "Settled", "Written Off".
        - line: a short snippet from the report that clearly identifies the account (bank + product or similar).
 
-Return STRICT JSON with exactly this shape (no extra fields, no comments, no trailing text):
+5) totals
+   - You may approximate totals, BUT the backend will override them later if a clear summary exists.
+   - Still, please try to be reasonable: use any overall "Total Current Bal", "Total Sanctioned", "Total CC Limit" etc.
+   - Always return numeric values (no commas).
+
+Return STRICT JSON (no comments, no extra fields):
 
 {
   "score": number,
@@ -153,8 +187,6 @@ Return STRICT JSON with exactly this shape (no extra fields, no comments, no tra
     }
   ]
 }
-
-Now read the report text below and fill this JSON:
 
 REPORT TEXT:
 ${extractedText}
@@ -235,10 +267,10 @@ ${extractedText}
     };
   }
 
-  parsed.totals.loanSanctioned = Number(parsed.totals.loanSanctioned || 0);
-  parsed.totals.loanOutstanding = Number(parsed.totals.loanOutstanding || 0);
-  parsed.totals.cardLimit = Number(parsed.totals.cardLimit || 0);
-  parsed.totals.cardOutstanding = Number(parsed.totals.cardOutstanding || 0);
+  parsed.totals.loanSanctioned = parseAmount(parsed.totals.loanSanctioned);
+  parsed.totals.loanOutstanding = parseAmount(parsed.totals.loanOutstanding);
+  parsed.totals.cardLimit = parseAmount(parsed.totals.cardLimit);
+  parsed.totals.cardOutstanding = parseAmount(parsed.totals.cardOutstanding);
 
   parsed.loans = Array.isArray(parsed.loans) ? parsed.loans : [];
 
@@ -288,7 +320,7 @@ app.post("/analyze", upload.single("pdf"), async (req, res) => {
       });
     }
 
-    // Run AI interpretation
+    // Run AI interpretation (score, loans, enquiries, dpd, rough totals)
     let aiResult;
     try {
       aiResult = await analyzeWithAI(extractedText);
@@ -299,6 +331,9 @@ app.post("/analyze", upload.single("pdf"), async (req, res) => {
         message: "AI parsing error: " + aiErr.message,
       });
     }
+
+    // 🔒 Override totals with deterministic Experian summary when available
+    aiResult.totals = overrideTotalsFromSummary(extractedText, aiResult.totals);
 
     res.json({
       success: true,
