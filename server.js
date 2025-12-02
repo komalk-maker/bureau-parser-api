@@ -1,5 +1,5 @@
 /* ===========================================================
-   KALKI FINSERV – AI BUREAU PARSER BACKEND (FULL WORKING FILE)
+   KALKI FINSERV – AI BUREAU PARSER BACKEND (ROBUST VERSION)
    =========================================================== */
 
 import express from "express";
@@ -32,7 +32,11 @@ function parseAmount(str) {
 // ---------- OCR SPACE ----------
 async function performOcrOnPdf(filePath) {
   const apiKey = process.env.OCR_SPACE_API_KEY;
-  if (!apiKey) throw new Error("OCR_SPACE_API_KEY not configured");
+  if (!apiKey) {
+    // Do NOT crash API if OCR key not present
+    console.warn("OCR_SPACE_API_KEY not configured – skipping OCR");
+    return "";
+  }
 
   const buffer = await fs.promises.readFile(filePath);
   const blob = new Blob([buffer], { type: "application/pdf" });
@@ -41,19 +45,26 @@ async function performOcrOnPdf(filePath) {
   formData.append("apikey", apiKey);
   formData.append("file", blob, "bureau.pdf");
   formData.append("language", "eng");
+  formData.append("isOverlayRequired", "false");
 
   const res = await fetch("https://api.ocr.space/parse/image", {
     method: "POST",
     body: formData,
   });
 
+  if (!res.ok) {
+    console.error("OCR HTTP error:", res.status, await res.text());
+    throw new Error("OCR API error");
+  }
+
   const data = await res.json();
 
   if (data.OCRExitCode !== 1 || !data.ParsedResults?.length) {
+    console.error("OCR bad response:", data);
     throw new Error("OCR failed");
   }
 
-  return data.ParsedResults.map(r => r.ParsedText || "").join("\n");
+  return data.ParsedResults.map((r) => r.ParsedText || "").join("\n");
 }
 
 // ---------- Extract Total Current Bal. amt ----------
@@ -77,6 +88,10 @@ function extractTotalCurrentBalance(text) {
 // AI PARSER — SCORE, LOANS (WITH DETAILS), ENQUIRIES
 // =====================================================
 async function analyzeWithAI(extractedText) {
+  if (!process.env.OPENAI_API_KEY) {
+    throw new Error("OPENAI_API_KEY missing");
+  }
+
   const prompt = `
 You are an expert reader of Indian credit bureau reports (Experian/CIBIL/CRIF/Equifax).
 
@@ -165,9 +180,9 @@ ${extractedText}
                 "loanSanctioned",
                 "loanOutstanding",
                 "cardLimit",
-                "cardOutstanding"
+                "cardOutstanding",
               ],
-              additionalProperties: false
+              additionalProperties: false,
             },
             loans: {
               type: "array",
@@ -193,7 +208,7 @@ ${extractedText}
                       amountOverdue: { type: "number" },
                       emiAmount: { type: "number" },
                       securityOrCollateral: { type: "string" },
-                      dpdHistory: { type: "string" }
+                      dpdHistory: { type: "string" },
                     },
                     required: [
                       "lender",
@@ -209,14 +224,14 @@ ${extractedText}
                       "amountOverdue",
                       "emiAmount",
                       "securityOrCollateral",
-                      "dpdHistory"
+                      "dpdHistory",
                     ],
-                    additionalProperties: false
-                  }
+                    additionalProperties: false,
+                  },
                 },
                 required: ["type", "status", "line", "details"],
-                additionalProperties: false
-              }
+                additionalProperties: false,
+              },
             },
             enquiries: {
               type: "array",
@@ -227,18 +242,18 @@ ${extractedText}
                   enquiryType: { type: "string" },
                   date: { type: "string" },
                   amount: { type: "number" },
-                  status: { type: "string" }
+                  status: { type: "string" },
                 },
                 required: [
                   "institution",
                   "enquiryType",
                   "date",
                   "amount",
-                  "status"
+                  "status",
                 ],
-                additionalProperties: false
-              }
-            }
+                additionalProperties: false,
+              },
+            },
           },
           required: [
             "score",
@@ -246,21 +261,44 @@ ${extractedText}
             "dpd",
             "totals",
             "loans",
-            "enquiries"
+            "enquiries",
           ],
-          additionalProperties: false
-        }
-      }
-    }
+          additionalProperties: false,
+        },
+      },
+    },
   });
 
   const raw = response.output[0].content[0].text;
   let parsed = JSON.parse(raw);
 
   // Normalize
-  parsed.score ||= 0;
-  parsed.enquiryCount ||= 0;
-  parsed.dpd ||= "0 - Clean";
+  parsed.score = typeof parsed.score === "number" ? parsed.score : 0;
+  parsed.enquiryCount =
+    typeof parsed.enquiryCount === "number" ? parsed.enquiryCount : 0;
+  parsed.dpd = parsed.dpd || "0 - Clean";
+
+  if (!parsed.totals) {
+    parsed.totals = {
+      loanSanctioned: 0,
+      loanOutstanding: 0,
+      cardLimit: 0,
+      cardOutstanding: 0,
+    };
+  }
+
+  parsed.totals.loanSanctioned = parseAmount(parsed.totals.loanSanctioned);
+  parsed.totals.loanOutstanding = parseAmount(parsed.totals.loanOutstanding);
+  parsed.totals.cardLimit = parseAmount(parsed.totals.cardLimit);
+  parsed.totals.cardOutstanding = parseAmount(parsed.totals.cardOutstanding);
+
+  parsed.loans = Array.isArray(parsed.loans) ? parsed.loans : [];
+  parsed.enquiries = Array.isArray(parsed.enquiries) ? parsed.enquiries : [];
+
+  parsed.loans = parsed.loans.map((l) => ({
+    ...l,
+    details: l.details || {},
+  }));
 
   return parsed;
 }
@@ -269,6 +307,10 @@ ${extractedText}
 // AI — SUM OF ACTIVE "Sanction Amt / Highest Credit"
 // =====================================================
 async function computeSanctionTotalActiveWithAI(extractedText) {
+  if (!process.env.OPENAI_API_KEY) {
+    throw new Error("OPENAI_API_KEY missing");
+  }
+
   const lower = extractedText.toLowerCase();
   const marker = "summary: credit account information";
   const idx = lower.indexOf(marker);
@@ -301,13 +343,13 @@ ${block}
         schema: {
           type: "object",
           properties: {
-            totalSanctionedActive: { type: "number" }
+            totalSanctionedActive: { type: "number" },
           },
           required: ["totalSanctionedActive"],
-          additionalProperties: false
-        }
-      }
-    }
+          additionalProperties: false,
+        },
+      },
+    },
   });
 
   const raw = response.output[0].content[0].text;
@@ -322,39 +364,92 @@ ${block}
 app.post("/analyze", upload.single("pdf"), async (req, res) => {
   let filePath;
   try {
-    if (!req.file) return res.json({ success: false, message: "No PDF provided" });
+    if (!req.file) {
+      return res.json({ success: false, message: "No PDF provided" });
+    }
 
     filePath = req.file.path;
 
-    let extractedText = (await pdf(fs.readFileSync(filePath))).text || "";
+    const dataBuffer = fs.readFileSync(filePath);
+    const pdfData = await pdf(dataBuffer);
+    let extractedText = pdfData.text || "";
 
-    // If PDF text too short → OCR
-    if (extractedText.trim().length < 300) {
-      extractedText = await performOcrOnPdf(filePath);
+    console.log("Initial PDF text length:", extractedText.length);
+
+    // If PDF text too short → try OCR, but don't crash if OCR fails
+    if (!extractedText || extractedText.trim().length < 300) {
+      console.log("Text short, attempting OCR...");
+      try {
+        const ocrText = await performOcrOnPdf(filePath);
+        if (ocrText && ocrText.trim().length > 100) {
+          extractedText = ocrText;
+          console.log("OCR text length:", extractedText.length);
+        } else {
+          console.warn("OCR returned too little text, keeping original extracted text");
+        }
+      } catch (ocrErr) {
+        console.error("OCR Error:", ocrErr);
+        // We continue with whatever pdf-parse gave us (may still be enough)
+      }
     }
 
-    if (extractedText.trim().length < 100) {
-      return res.json({ success: false, message: "Unreadable PDF" });
+    if (!extractedText || extractedText.trim().length < 100) {
+      return res.json({
+        success: false,
+        message:
+          "Unreadable PDF. Please upload the original bureau report downloaded as PDF.",
+      });
     }
 
     // 1) AI extraction: score / loans / enquiries / rough totals
-    const ai = await analyzeWithAI(extractedText);
+    let ai;
+    try {
+      ai = await analyzeWithAI(extractedText);
+    } catch (aiErr) {
+      console.error("AI parsing error:", aiErr);
+      const msg =
+        aiErr.response?.data?.error?.message ||
+        aiErr.message ||
+        "Unknown AI error";
+      return res.json({
+        success: false,
+        message: "AI parsing error: " + msg,
+      });
+    }
 
-    // 2) Override OUTSTANDING total
-    ai.totals.loanOutstanding = extractTotalCurrentBalance(extractedText);
+    // 2) Override OUTSTANDING total with Total Current Bal. amt
+    const totalCurrentBal = extractTotalCurrentBalance(extractedText);
+    if (!ai.totals) ai.totals = {};
+    ai.totals.loanOutstanding = totalCurrentBal || ai.totals.loanOutstanding || 0;
 
     // 3) Override SANCTIONED from ACTIVE accounts
-    ai.totals.loanSanctioned =
-      await computeSanctionTotalActiveWithAI(extractedText);
+    try {
+      const sanctionActive = await computeSanctionTotalActiveWithAI(
+        extractedText
+      );
+      ai.totals.loanSanctioned =
+        sanctionActive || ai.totals.loanSanctioned || 0;
+    } catch (sanErr) {
+      console.error("Sanction sum error:", sanErr);
+      ai.totals.loanSanctioned = ai.totals.loanSanctioned || 0;
+    }
 
-    res.json({ success: true, message: "Parsed OK", result: ai });
-
+    res.json({
+      success: true,
+      message: "PDF parsed successfully",
+      result: ai,
+    });
   } catch (e) {
-    console.error(e);
+    console.error("Fatal error in /analyze:", e);
     res.json({ success: false, message: "Error parsing PDF" });
-
   } finally {
-    if (filePath) fs.unlinkSync(filePath);
+    if (filePath) {
+      try {
+        fs.unlinkSync(filePath);
+      } catch (cleanupErr) {
+        console.error("File cleanup error:", cleanupErr);
+      }
+    }
   }
 });
 
