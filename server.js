@@ -21,7 +21,7 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-// Small helper: parse Indian-style amounts like "40,88,632"
+// --------- Helpers ----------
 function parseAmount(str) {
   if (!str) return 0;
   const cleaned = String(str).replace(/[^0-9.-]/g, "");
@@ -61,71 +61,72 @@ async function performOcrOnPdf(filePath) {
 }
 
 // ==============================================
-// EXPERIAN-SPECIFIC TOTALS FROM REPORT SUMMARY
+// EXPERIAN LOGIC FOR TOTALS (DETERMINISTIC)
 // ==============================================
 
-// Look for "REPORT SUMMARY" / "Current Balance Amount Summary" style totals
-function extractTotalsFromExperianSummary(text) {
-  const out = {};
-
-  // Normalise some spacing
+// 1️⃣ Total Debt O/s  -> "Total Current Bal. amt" from summary
+function extractTotalCurrentBalance(text) {
   const t = text.replace(/\r/g, "").replace(/\u00a0/g, " ");
+  const patterns = [
+    /Total\s+Current\s+Bal\.?\s*amt[^\d]{0,20}([\d,]+)/i,
+    /Total\s+Current\s+Balance[^\d]{0,20}([\d,]+)/i
+  ];
 
-  // 1) Total Current Bal. amt  -> loanOutstanding (ALL accounts)
-  const totalCurrentMatch = t.match(
-    /Total\s+Current\s+Bal\.?\s*amt\s*([0-9,]+)/i
-  );
-  if (totalCurrentMatch) {
-    out.loanOutstanding = parseAmount(totalCurrentMatch[1]);
+  for (const re of patterns) {
+    const m = t.match(re);
+    if (m && m[1]) {
+      return parseAmount(m[1]);
+    }
   }
-
-  // 2) Optional card summaries (if Experian provides them in other sections)
-  //    These are best-effort; if not found, we won't override.
-  const cardLimitMatch = t.match(
-    /Total\s+(?:Credit\s*Card|CC(?:\/CO)?)\s+(?:High\s+Credit|Credit\s+Limit|Limit)\s*([0-9,]+)/i
-  );
-  if (cardLimitMatch) {
-    out.cardLimit = parseAmount(cardLimitMatch[1]);
-  }
-
-  const cardOutstandingMatch = t.match(
-    /Total\s+(?:Credit\s*Card|CC(?:\/CO)?)\s+(?:Current\s+Bal\.?|Outstanding|O\/s)\s*([0-9,]+)/i
-  );
-  if (cardOutstandingMatch) {
-    out.cardOutstanding = parseAmount(cardOutstandingMatch[1]);
-  }
-
-  return out;
+  return 0;
 }
 
-// Given AI totals + raw text, override with Experian summary when available
-function overrideTotalsFromSummary(extractedText, originalTotals = {}) {
-  const base = {
-    loanSanctioned: parseAmount(originalTotals.loanSanctioned),
-    loanOutstanding: parseAmount(originalTotals.loanOutstanding),
-    cardLimit: parseAmount(originalTotals.cardLimit),
-    cardOutstanding: parseAmount(originalTotals.cardOutstanding),
-  };
+// 2️⃣ Sanctioned  -> sum of "Sanction Amt / Highest Credit" column
+function sumSanctionAmtColumn(text) {
+  const lines = text
+    .replace(/\r/g, "")
+    .replace(/\u00a0/g, " ")
+    .split("\n")
+    .map(l => l.trim())
+    .filter(Boolean);
 
-  const summary = extractTotalsFromExperianSummary(extractedText);
+  const headerIndex = lines.findIndex(l =>
+    /Sanction\s*Amt\s*\/\s*Highest\s*Credit/i.test(l)
+  );
 
-  // Only override if we positively found a summary number
-  if (summary.loanOutstanding) {
-    base.loanOutstanding = summary.loanOutstanding;
-  }
-  if (summary.cardLimit) {
-    base.cardLimit = summary.cardLimit;
-  }
-  if (summary.cardOutstanding) {
-    base.cardOutstanding = summary.cardOutstanding;
+  if (headerIndex === -1) {
+    return 0;
   }
 
-  return base;
+  let total = 0;
+
+  // start just after header row
+  for (let i = headerIndex + 1; i < lines.length; i++) {
+    const line = lines[i];
+
+    // stop when we hit another section / summary
+    if (/Current Balance Amount Summary|Credit Enquiry Summary|REPORT SUMMARY/i.test(line)) {
+      break;
+    }
+
+    // find all number-like tokens (with commas or 4+ digits)
+    const nums = line.match(/(\d{1,3}(?:,\d{2,3})+|\d{4,}|\d+\.\d+)/g);
+    if (!nums) continue;
+
+    // heuristic: "Sanction Amt / Highest Credit" tends to be the last big number on that row
+    const candidate = nums[nums.length - 1];
+    const val = parseAmount(candidate);
+    if (val > 0) {
+      total += val;
+    }
+  }
+
+  return total;
 }
 
 // ==============================================
-// AI PARSER – EXTRACT SCORE, LOANS, ENQUIRIES, DPD
-// (Totals will be corrected afterwards with regex)
+// AI PARSER – SCORE, ENQUIRIES, LOANS, DPD
+// (Totals will be overridden with above logic)
 // ==============================================
 async function analyzeWithAI(extractedText) {
   if (!process.env.OPENAI_API_KEY) {
@@ -163,8 +164,9 @@ Read it like a human and extract exactly the following fields:
        - line: a short snippet from the report that clearly identifies the account (bank + product or similar).
 
 5) totals
-   - You may approximate totals, BUT the backend will override them later if a clear summary exists.
-   - Still, please try to be reasonable: use any overall "Total Current Bal", "Total Sanctioned", "Total CC Limit" etc.
+   - Just give a reasonable approximation of:
+       loanSanctioned, loanOutstanding, cardLimit, cardOutstanding.
+   - The backend will override some of these with deterministic logic from the raw text.
    - Always return numeric values (no commas).
 
 Return STRICT JSON (no comments, no extra fields):
@@ -332,8 +334,15 @@ app.post("/analyze", upload.single("pdf"), async (req, res) => {
       });
     }
 
-    // 🔒 Override totals with deterministic Experian summary when available
-    aiResult.totals = overrideTotalsFromSummary(extractedText, aiResult.totals);
+    // 🔒 Override totals with your exact logic:
+    // Total Debt O/s = Total Current Bal. amt
+    // Sanctioned = sum of "Sanction Amt / Highest Credit" column
+    const totalCurrentBal = extractTotalCurrentBalance(extractedText);
+    const sanctionSum = sumSanctionAmtColumn(extractedText);
+
+    if (!aiResult.totals) aiResult.totals = {};
+    aiResult.totals.loanOutstanding = totalCurrentBal || aiResult.totals.loanOutstanding || 0;
+    aiResult.totals.loanSanctioned = sanctionSum || aiResult.totals.loanSanctioned || 0;
 
     res.json({
       success: true,
