@@ -63,7 +63,6 @@ async function performOcrOnPdf(filePath) {
 // ==============================================
 // EXPERIAN: TOTAL CURRENT BALANCE (for O/s)
 // ==============================================
-
 function extractTotalCurrentBalance(text) {
   const t = text.replace(/\r/g, "").replace(/\u00a0/g, " ");
   const patterns = [
@@ -81,8 +80,7 @@ function extractTotalCurrentBalance(text) {
 }
 
 // ==============================================
-// AI PARSER – SCORE, ENQUIRIES, LOANS, DPD, ROUGH TOTALS
-// (Totals will be overridden later)
+// AI PARSER – SCORE, ENQUIRIES, LOANS (WITH DETAILS), ROUGH TOTALS
 // ==============================================
 async function analyzeWithAI(extractedText) {
   if (!process.env.OPENAI_API_KEY) {
@@ -113,13 +111,40 @@ Read it like a human and extract exactly the following fields:
    - Example: "30+ DPD in 1 account", "No DPD in last 24 months", etc.
 
 4) loans
-   - A concise list of credit facilities (loans and credit cards).
-   - Each item:
-       - type: e.g. "Home Loan", "LAP", "Personal Loan", "Auto Loan", "Credit Card", "OD", etc.
+   - This comes primarily from the sections:
+       "SUMMARY: CREDIT ACCOUNT INFORMATION" and
+       "CREDIT ACCOUNT INFORMATION DETAILS" (or similar names).
+   - Return one item per credit facility (loan / card / OD / LAP etc).
+   - Each item has:
+       - type: high-level type such as "Home Loan", "LAP", "Personal Loan", "Auto Loan", "Credit Card", "OD", etc.
        - status: e.g. "Active", "Closed", "Settled", "Written Off".
-       - line: a short snippet from the report that clearly identifies the account (bank + product or similar).
+       - line: a short one-line description for display (e.g. "HDFC Bank • Home Loan • ACTIVE").
+       - details: object with as many of the following fields as you can fill from "CREDIT ACCOUNT INFORMATION DETAILS":
+           * lender
+           * accountType
+           * accountNumber
+           * ownership
+           * accountStatus
+           * dateOpened
+           * dateReported
+           * dateClosed
+           * sanctionAmount         (numeric, no commas)
+           * currentBalance         (numeric, no commas)
+           * amountOverdue          (numeric, no commas)
+           * emiAmount              (numeric, no commas)
+           * securityOrCollateral   (string if present)
+           * dpdHistory             (string summary, e.g. "No DPD in last 24 months")
 
-5) totals
+5) enquiries
+   - From the "CREDIT ENQUIRIES" section.
+   - Each enquiry item should have:
+       - institution: name of the lender/bank/NBFC.
+       - enquiryType: e.g. "Credit Card", "Personal Loan", "Auto Loan", etc.
+       - date: enquiry date as it appears (e.g. "15-11-2025" or "2025-11-15").
+       - amount: enquiry amount if present (numeric, no commas).
+       - status: e.g. "Approved", "Pending", "Rejected" if visible, otherwise "".
+
+6) totals
    - Just give a reasonable approximation of:
        loanSanctioned, loanOutstanding, cardLimit, cardOutstanding.
    - The backend will override some of these with deterministic logic from the raw text.
@@ -141,7 +166,32 @@ Return STRICT JSON (no comments, no extra fields):
     {
       "type": string,
       "status": string,
-      "line": string
+      "line": string,
+      "details": {
+        "lender": string,
+        "accountType": string,
+        "accountNumber": string,
+        "ownership": string,
+        "accountStatus": string,
+        "dateOpened": string,
+        "dateReported": string,
+        "dateClosed": string,
+        "sanctionAmount": number,
+        "currentBalance": number,
+        "amountOverdue": number,
+        "emiAmount": number,
+        "securityOrCollateral": string,
+        "dpdHistory": string
+      }
+    }
+  ],
+  "enquiries": [
+    {
+      "institution": string,
+      "enquiryType": string,
+      "date": string,
+      "amount": number,
+      "status": string
     }
   ]
 }
@@ -156,7 +206,7 @@ ${extractedText}
     text: {
       format: {
         type: "json_schema",
-        name: "bureau_summary",
+        name: "bureau_summary_with_details",
         strict: true,
         schema: {
           type: "object",
@@ -188,13 +238,61 @@ ${extractedText}
                   type: { type: "string" },
                   status: { type: "string" },
                   line: { type: "string" },
+                  details: {
+                    type: "object",
+                    properties: {
+                      lender: { type: "string" },
+                      accountType: { type: "string" },
+                      accountNumber: { type: "string" },
+                      ownership: { type: "string" },
+                      accountStatus: { type: "string" },
+                      dateOpened: { type: "string" },
+                      dateReported: { type: "string" },
+                      dateClosed: { type: "string" },
+                      sanctionAmount: { type: "number" },
+                      currentBalance: { type: "number" },
+                      amountOverdue: { type: "number" },
+                      emiAmount: { type: "number" },
+                      securityOrCollateral: { type: "string" },
+                      dpdHistory: { type: "string" },
+                    },
+                    additionalProperties: false,
+                  },
                 },
                 required: ["type", "status", "line"],
                 additionalProperties: false,
               },
             },
+            enquiries: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  institution: { type: "string" },
+                  enquiryType: { type: "string" },
+                  date: { type: "string" },
+                  amount: { type: "number" },
+                  status: { type: "string" },
+                },
+                required: [
+                  "institution",
+                  "enquiryType",
+                  "date",
+                  "amount",
+                  "status",
+                ],
+                additionalProperties: false,
+              },
+            },
           },
-          required: ["score", "enquiryCount", "dpd", "totals", "loans"],
+          required: [
+            "score",
+            "enquiryCount",
+            "dpd",
+            "totals",
+            "loans",
+            "enquiries",
+          ],
           additionalProperties: false,
         },
       },
@@ -211,6 +309,7 @@ ${extractedText}
     throw new Error("AI returned invalid JSON");
   }
 
+  // Normalise / defaults
   parsed.score = typeof parsed.score === "number" ? parsed.score : 0;
   parsed.enquiryCount =
     typeof parsed.enquiryCount === "number" ? parsed.enquiryCount : 0;
@@ -231,6 +330,13 @@ ${extractedText}
   parsed.totals.cardOutstanding = parseAmount(parsed.totals.cardOutstanding);
 
   parsed.loans = Array.isArray(parsed.loans) ? parsed.loans : [];
+  parsed.enquiries = Array.isArray(parsed.enquiries) ? parsed.enquiries : [];
+
+  // Ensure each loan has a details object
+  parsed.loans = parsed.loans.map((l) => ({
+    ...l,
+    details: l.details || {},
+  }));
 
   return parsed;
 }
@@ -254,7 +360,7 @@ async function computeSanctionTotalActiveWithAI(extractedText) {
     // take a generous slice after the marker (e.g. next 6000 chars)
     summaryBlock = extractedText.slice(startIdx, startIdx + 6000);
   } else {
-    // fallback: use whole text (AI will do its best)
+    // fallback: use whole text
     console.warn("Could not locate 'SUMMARY: CREDIT ACCOUNT INFORMATION' block");
     summaryBlock = extractedText;
   }
@@ -279,7 +385,7 @@ Your TASK:
 1. Consider ONLY rows where **Account Status is "ACTIVE"**.
 2. For each ACTIVE row, read the numeric value in the **"Sanction Amt / Highest Credit"** column.
 3. Sum all those values (active accounts only).
-4. Ignore CLOSED / SETTLED / WRITTEN-OFF rows completely (do NOT include them in the sum).
+4. Ignore CLOSED / SETTLED / WRITTEN-OFF rows completely.
 5. Parse Indian-style amounts like "7,50,000" or "33,25,000" correctly.
 
 Return STRICT JSON only:
@@ -373,7 +479,7 @@ app.post("/analyze", upload.single("pdf"), async (req, res) => {
       });
     }
 
-    // 1) Run AI interpretation (score, loans, enquiries, dpd, rough totals)
+    // 1) Run AI interpretation (score, loans + details, enquiries, rough totals)
     let aiResult;
     try {
       aiResult = await analyzeWithAI(extractedText);
