@@ -1,5 +1,5 @@
 /* ===========================================================
-   KALKI FINSERV – AI BUREAU PARSER BACKEND (SINGLE AI CALL)
+   KALKI FINSERV – BUREAU PARSER BACKEND (NO OPENAI – RULE BASED)
    =========================================================== */
 
 import express from "express";
@@ -7,7 +7,6 @@ import multer from "multer";
 import pdf from "pdf-parse";
 import cors from "cors";
 import fs from "fs";
-import OpenAI from "openai";
 
 const app = express();
 app.use(cors());
@@ -15,11 +14,6 @@ app.use(express.json());
 
 // File upload directory
 const upload = multer({ dest: "uploads/" });
-
-// OpenAI client
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
 
 // ---------- Utility Helpers ----------
 function parseAmount(str) {
@@ -29,7 +23,14 @@ function parseAmount(str) {
   return Number.isFinite(num) ? num : 0;
 }
 
-// ---------- OCR SPACE ----------
+function cleanText(t) {
+  return (t || "")
+    .replace(/\r/g, "")
+    .replace(/\u00a0/g, " ")
+    .replace(/[^\S\r\n]+/g, " ");
+}
+
+// ---------- OCR SPACE (optional, if you have key) ----------
 async function performOcrOnPdf(filePath) {
   const apiKey = process.env.OCR_SPACE_API_KEY;
   if (!apiKey) {
@@ -66,245 +67,235 @@ async function performOcrOnPdf(filePath) {
   return data.ParsedResults.map((r) => r.ParsedText || "").join("\n");
 }
 
+// ---------- Extract main score ----------
+function extractScore(text) {
+  const t = cleanText(text);
+  const patterns = [
+    /(Experian|CIBIL|CRIF|Equifax)\s+(?:credit\s+)?score\s*[:\-]?\s*(\d{3})/i,
+    /Credit\s+Score\s*[:\-]?\s*(\d{3})/i,
+  ];
+  for (const re of patterns) {
+    const m = t.match(re);
+    if (m && m[2]) return parseInt(m[2], 10);
+  }
+  // fallback: first 3-digit number between 300–900 near top
+  const lines = t.split("\n").slice(0, 30).join(" ");
+  const m2 = lines.match(/(\d{3})/g);
+  if (m2) {
+    const num = m2.map((x) => parseInt(x, 10)).find((n) => n >= 300 && n <= 900);
+    if (num) return num;
+  }
+  return 0;
+}
+
 // ---------- Extract Total Current Bal. amt ----------
 function extractTotalCurrentBalance(text) {
-  const t = text.replace(/\r/g, "").replace(/\u00a0/g, " ");
-
+  const t = cleanText(text);
   const patterns = [
     /Total\s+Current\s+Bal\.?\s*amt[^\d]{0,30}([\d,]+)/i,
     /Total\s+Current\s+Balance[^\d]{0,30}([\d,]+)/i,
   ];
-
   for (const re of patterns) {
     const m = t.match(re);
     if (m && m[1]) return parseAmount(m[1]);
   }
-
   return 0;
 }
 
-// =====================================================
-// AI PARSER — SCORE, LOANS (WITH DETAILS), ENQUIRIES
-// =====================================================
-async function analyzeWithAI(extractedText) {
-  if (!process.env.OPENAI_API_KEY) {
-    throw new Error("OPENAI_API_KEY missing");
+// ---------- Find block between markers ----------
+function sliceBetween(text, startMarker, endMarkers = []) {
+  const lower = text.toLowerCase();
+  const startIdx = lower.indexOf(startMarker.toLowerCase());
+  if (startIdx === -1) return "";
+  let endIdx = text.length;
+  for (const em of endMarkers) {
+    const i = lower.indexOf(em.toLowerCase(), startIdx + startMarker.length);
+    if (i !== -1 && i < endIdx) endIdx = i;
   }
-
-  const prompt = `
-You are an expert reader of Indian credit bureau reports (Experian/CIBIL/CRIF/Equifax).
-
-Extract the following strictly in JSON:
-
-1) score — the main bureau score only.
-2) enquiryCount — total credit enquiries.
-3) dpd — a short summary of delinquencies / overdues.
-4) loans[] — one item per credit facility, using:
-   - "SUMMARY: CREDIT ACCOUNT INFORMATION"
-   - "CREDIT ACCOUNT INFORMATION DETAILS"
-5) enquiries[] — from "CREDIT ENQUIRIES".
-6) totals — rough values (backend/frontend may override parts).
-
-For each loan, include a "details" object. For dpdHistory, output a compact month/year view like:
-"2023-01: 30, 2023-03: 60" or "" if none.
-
-STRICT JSON shape:
-
-{
-  "score": number,
-  "enquiryCount": number,
-  "dpd": string,
-  "totals": {
-    "loanSanctioned": number,
-    "loanOutstanding": number,
-    "cardLimit": number,
-    "cardOutstanding": number
-  },
-  "loans": [
-    {
-      "type": string,
-      "status": string,
-      "line": string,
-      "details": {
-        "lender": string,
-        "accountType": string,
-        "accountNumber": string,
-        "ownership": string,
-        "accountStatus": string,
-        "dateOpened": string,
-        "dateReported": string,
-        "dateClosed": string,
-        "sanctionAmount": number,
-        "currentBalance": number,
-        "amountOverdue": number,
-        "emiAmount": number,
-        "securityOrCollateral": string,
-        "dpdHistory": string
-      }
-    }
-  ],
-  "enquiries": [
-    {
-      "institution": string,
-      "enquiryType": string,
-      "date": string,
-      "amount": number,
-      "status": string
-    }
-  ]
+  return text.slice(startIdx, endIdx);
 }
 
-REPORT TEXT:
-${extractedText}
-`;
+// ---------- Parse loans from SUMMARY: CREDIT ACCOUNT INFORMATION ----------
+function parseLoansFromSummary(text) {
+  const block = sliceBetween(
+    text,
+    "SUMMARY: CREDIT ACCOUNT INFORMATION",
+    ["CREDIT ACCOUNT INFORMATION DETAILS", "CREDIT ENQUIRIES", "SUMMARY: CREDIT ENQUIRIES"]
+  );
 
-  const response = await openai.responses.create({
-    model: "gpt-4.1-mini",
-    input: prompt,
-    text: {
-      format: {
-        type: "json_schema",
-        name: "bureau_summary_with_details",
-        strict: true,
-        schema: {
-          type: "object",
-          properties: {
-            score: { type: "number" },
-            enquiryCount: { type: "number" },
-            dpd: { type: "string" },
-            totals: {
-              type: "object",
-              properties: {
-                loanSanctioned: { type: "number" },
-                loanOutstanding: { type: "number" },
-                cardLimit: { type: "number" },
-                cardOutstanding: { type: "number" },
-              },
-              required: [
-                "loanSanctioned",
-                "loanOutstanding",
-                "cardLimit",
-                "cardOutstanding",
-              ],
-              additionalProperties: false,
-            },
-            loans: {
-              type: "array",
-              items: {
-                type: "object",
-                properties: {
-                  type: { type: "string" },
-                  status: { type: "string" },
-                  line: { type: "string" },
-                  details: {
-                    type: "object",
-                    properties: {
-                      lender: { type: "string" },
-                      accountType: { type: "string" },
-                      accountNumber: { type: "string" },
-                      ownership: { type: "string" },
-                      accountStatus: { type: "string" },
-                      dateOpened: { type: "string" },
-                      dateReported: { type: "string" },
-                      dateClosed: { type: "string" },
-                      sanctionAmount: { type: "number" },
-                      currentBalance: { type: "number" },
-                      amountOverdue: { type: "number" },
-                      emiAmount: { type: "number" },
-                      securityOrCollateral: { type: "string" },
-                      dpdHistory: { type: "string" },
-                    },
-                    required: [
-                      "lender",
-                      "accountType",
-                      "accountNumber",
-                      "ownership",
-                      "accountStatus",
-                      "dateOpened",
-                      "dateReported",
-                      "dateClosed",
-                      "sanctionAmount",
-                      "currentBalance",
-                      "amountOverdue",
-                      "emiAmount",
-                      "securityOrCollateral",
-                      "dpdHistory",
-                    ],
-                    additionalProperties: false,
-                  },
-                },
-                required: ["type", "status", "line", "details"],
-                additionalProperties: false,
-              },
-            },
-            enquiries: {
-              type: "array",
-              items: {
-                type: "object",
-                properties: {
-                  institution: { type: "string" },
-                  enquiryType: { type: "string" },
-                  date: { type: "string" },
-                  amount: { type: "number" },
-                  status: { type: "string" },
-                },
-                required: [
-                  "institution",
-                  "enquiryType",
-                  "date",
-                  "amount",
-                  "status",
-                ],
-                additionalProperties: false,
-              },
-            },
-          },
-          required: [
-            "score",
-            "enquiryCount",
-            "dpd",
-            "totals",
-            "loans",
-            "enquiries",
-          ],
-          additionalProperties: false,
-        },
-      },
-    },
-  });
+  if (!block) return [];
 
-  const raw = response.output[0].content[0].text;
-  let parsed = JSON.parse(raw);
+  const lines = block.split("\n").map((l) => l.trim()).filter(Boolean);
 
-  // Normalize
-  parsed.score = typeof parsed.score === "number" ? parsed.score : 0;
-  parsed.enquiryCount =
-    typeof parsed.enquiryCount === "number" ? parsed.enquiryCount : 0;
-  parsed.dpd = parsed.dpd || "0 - Clean";
+  // Find header line (contains lender + account + current)
+  let headerIndex = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i].toLowerCase();
+    if (
+      (l.includes("lender") || l.includes("member")) &&
+      l.includes("account") &&
+      (l.includes("current") || l.includes("sanction"))
+    ) {
+      headerIndex = i;
+      break;
+    }
+  }
+  if (headerIndex === -1) return [];
 
-  if (!parsed.totals) {
-    parsed.totals = {
-      loanSanctioned: 0,
-      loanOutstanding: 0,
-      cardLimit: 0,
-      cardOutstanding: 0,
-    };
+  const headerLine = lines[headerIndex];
+  const headerCols = headerLine.split(/\s{2,}/).map((h) => h.trim());
+
+  const idx = {
+    lender: headerCols.findIndex((h) => /lender|member/i.test(h)),
+    accountType: headerCols.findIndex((h) => /account\s*type/i.test(h)),
+    accountNumber: headerCols.findIndex((h) => /account\s*no|account\s*number/i.test(h)),
+    ownership: headerCols.findIndex((h) => /ownership/i.test(h)),
+    accountStatus: headerCols.findIndex((h) => /status/i.test(h)),
+    dateOpened: headerCols.findIndex((h) => /date\s*opened/i.test(h)),
+    dateReported: headerCols.findIndex((h) => /date\s*reported/i.test(h)),
+    dateClosed: headerCols.findIndex((h) => /date\s*closed/i.test(h)),
+    sanction: headerCols.findIndex((h) => /sanction|highest\s*credit/i.test(h)),
+    current: headerCols.findIndex((h) => /current\s*balance|current\s*bal/i.test(h)),
+    overdue: headerCols.findIndex((h) => /amount\s*overdue/i.test(h)),
+  };
+
+  function getCol(cols, idxVal) {
+    if (idxVal === -1) return "";
+    return cols[idxVal] || "";
   }
 
-  parsed.totals.loanSanctioned = parseAmount(parsed.totals.loanSanctioned);
-  parsed.totals.loanOutstanding = parseAmount(parsed.totals.loanOutstanding);
-  parsed.totals.cardLimit = parseAmount(parsed.totals.cardLimit);
-  parsed.totals.cardOutstanding = parseAmount(parsed.totals.cardOutstanding);
+  const loans = [];
+  for (let i = headerIndex + 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line || /^total/i.test(line)) break;
+    if (/^summary: credit account information/i.test(line)) continue;
+    if (/^credit account information details/i.test(line)) break;
 
-  parsed.loans = Array.isArray(parsed.loans) ? parsed.loans : [];
-  parsed.enquiries = Array.isArray(parsed.enquiries) ? parsed.enquiries : [];
+    const cols = line.split(/\s{2,}/).map((c) => c.trim()).filter(Boolean);
+    if (cols.length < 3) continue;
 
-  parsed.loans = parsed.loans.map((l) => ({
-    ...l,
-    details: l.details || {},
-  }));
+    const lender = getCol(cols, idx.lender);
+    const accountType = getCol(cols, idx.accountType);
+    const accountNumber = getCol(cols, idx.accountNumber);
+    const ownership = getCol(cols, idx.ownership);
+    const accountStatus = getCol(cols, idx.accountStatus);
+    const dateOpened = getCol(cols, idx.dateOpened);
+    const dateReported = getCol(cols, idx.dateReported);
+    const dateClosed = getCol(cols, idx.dateClosed);
+    const sanctionStr = getCol(cols, idx.sanction);
+    const currentStr = getCol(cols, idx.current);
+    const overdueStr = getCol(cols, idx.overdue);
 
-  return parsed;
+    // skip header repeats / non-numeric sanction & current
+    if (!sanctionStr && !currentStr && !overdueStr) continue;
+
+    const sanctionAmount = parseAmount(sanctionStr);
+    const currentBalance = parseAmount(currentStr);
+    const amountOverdue = parseAmount(overdueStr);
+
+    const type = accountType || "Account";
+    const status = accountStatus || "Unknown";
+
+    const lineSummary = `${lender} • ${type} • ${status}`;
+
+    loans.push({
+      type,
+      status,
+      line: lineSummary,
+      details: {
+        lender,
+        accountType,
+        accountNumber,
+        ownership,
+        accountStatus,
+        dateOpened,
+        dateReported,
+        dateClosed,
+        sanctionAmount,
+        currentBalance,
+        amountOverdue,
+        emiAmount: 0,
+        securityOrCollateral: "",
+        dpdHistory: "", // we are not parsing month-wise DPD here in rule-based version
+      },
+    });
+  }
+
+  return loans;
+}
+
+// ---------- Parse CREDIT ENQUIRIES ----------
+function parseEnquiries(text) {
+  const block = sliceBetween(
+    text,
+    "CREDIT ENQUIRIES",
+    ["SUMMARY: CREDIT ACCOUNT INFORMATION", "CREDIT ACCOUNT INFORMATION DETAILS", "END OF REPORT"]
+  );
+  if (!block) return [];
+
+  const lines = block.split("\n").map((l) => l.trim()).filter(Boolean);
+
+  let headerIndex = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i].toLowerCase();
+    if (l.includes("institution") || (l.includes("member") && l.includes("name"))) {
+      headerIndex = i;
+      break;
+    }
+  }
+  if (headerIndex === -1) return [];
+
+  const headerLine = lines[headerIndex];
+  const headerCols = headerLine.split(/\s{2,}/).map((h) => h.trim());
+
+  const idx = {
+    institution: headerCols.findIndex((h) => /institution|member/i.test(h)),
+    enquiryType: headerCols.findIndex((h) => /type/i.test(h)),
+    date: headerCols.findIndex((h) => /date/i.test(h)),
+    amount: headerCols.findIndex((h) => /amount/i.test(h)),
+    status: headerCols.findIndex((h) => /status/i.test(h)),
+  };
+
+  function getCol(cols, idxVal) {
+    if (idxVal === -1) return "";
+    return cols[idxVal] || "";
+  }
+
+  const enquiries = [];
+  for (let i = headerIndex + 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line || /^total/i.test(line)) break;
+
+    const cols = line.split(/\s{2,}/).map((c) => c.trim()).filter(Boolean);
+    if (!cols.length) continue;
+
+    const institution = getCol(cols, idx.institution);
+    const enquiryType = getCol(cols, idx.enquiryType);
+    const date = getCol(cols, idx.date);
+    const amountStr = getCol(cols, idx.amount);
+    const status = getCol(cols, idx.status);
+
+    if (!institution && !enquiryType && !date) continue;
+
+    enquiries.push({
+      institution,
+      enquiryType,
+      date,
+      amount: parseAmount(amountStr),
+      status,
+    });
+  }
+
+  return enquiries;
+}
+
+// ---------- Build DPD summary ----------
+function buildDpdSummary(loans) {
+  const withOverdue = loans.filter(
+    (l) => (l.details.amountOverdue || 0) > 0
+  );
+  if (!withOverdue.length) return "0 - Clean";
+  return `Overdues in ${withOverdue.length} account(s)`;
 }
 
 // =====================================================
@@ -325,7 +316,7 @@ app.post("/analyze", upload.single("pdf"), async (req, res) => {
 
     console.log("Initial PDF text length:", extractedText.length);
 
-    // If PDF text too short → try OCR, but don't crash if OCR fails
+    // If PDF text too short → try OCR (if key configured)
     if (!extractedText || extractedText.trim().length < 300) {
       console.log("Text short, attempting OCR...");
       try {
@@ -350,45 +341,36 @@ app.post("/analyze", upload.single("pdf"), async (req, res) => {
       });
     }
 
-    // 1) AI extraction: score / loans / enquiries / rough totals
-    let ai;
-    try {
-      ai = await analyzeWithAI(extractedText);
-    } catch (aiErr) {
-      console.error("AI parsing error:", aiErr);
-      let msg =
-        aiErr.response?.data?.error?.message ||
-        aiErr.message ||
-        "Unknown AI error";
+    // ---------- Rule-based parsing ----------
 
-      // Make rate-limit error more friendly
-      if (msg.includes("Rate limit")) {
-        msg =
-          "Our AI engine is temporarily busy. Please wait 20–30 seconds and try again.";
-      }
-
-      return res.json({
-        success: false,
-        message: "AI parsing error: " + msg,
-      });
-    }
-
-    // 2) Override OUTSTANDING total with Total Current Bal. amt
+    const score = extractScore(extractedText);
+    const loans = parseLoansFromSummary(extractedText);
+    const enquiries = parseEnquiries(extractedText);
+    const enquiryCount = enquiries.length;
+    const dpdSummary = buildDpdSummary(loans);
     const totalCurrentBal = extractTotalCurrentBalance(extractedText);
-    if (!ai.totals) ai.totals = {};
-    ai.totals.loanOutstanding =
-      totalCurrentBal || ai.totals.loanOutstanding || 0;
 
-    // NOTE:
-    // We no longer do a second AI call for sanctioned sum.
-    // Frontend already computes:
-    //  - Sanctioned = sum of sanctionAmount for ACTIVE loans (from ai.loans.details)
-    //  - Credit card totals from ACTIVE credit card accounts.
+    // Totals structure expected by frontend
+    const totals = {
+      loanSanctioned: 0, // frontend recomputes from active loans' sanctionAmount
+      loanOutstanding: totalCurrentBal || 0, // O/s from Total Current Bal. amt
+      cardLimit: 0,       // frontend recomputes from active credit cards
+      cardOutstanding: 0, // frontend recomputes from active credit cards
+    };
+
+    const result = {
+      score,
+      enquiryCount,
+      dpd: dpdSummary,
+      totals,
+      loans,
+      enquiries,
+    };
 
     res.json({
       success: true,
-      message: "PDF parsed successfully",
-      result: ai,
+      message: "PDF parsed successfully (rule-based, no AI)",
+      result,
     });
   } catch (e) {
     console.error("Fatal error in /analyze:", e);
@@ -406,7 +388,7 @@ app.post("/analyze", upload.single("pdf"), async (req, res) => {
 
 // ---------- Test Route ----------
 app.get("/", (req, res) =>
-  res.send("Kalki Finserv Bureau Parser API is LIVE 🚀")
+  res.send("Kalki Finserv Bureau Parser (Rule-based) is LIVE 🚀")
 );
 
 // ---------- Start Server ----------
