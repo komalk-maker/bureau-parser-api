@@ -99,11 +99,20 @@ export function parseBureauReport(rawText) {
       cardKeywords.some(k => lower.includes(k))
     ) {
       let type = "Other";
-      if (/home loan/i.test(line)) type = "Home Loan";
-      else if (/personal loan/i.test(line)) type = "Personal Loan";
-      else if (/credit card/i.test(line) || /\bcard\b/i.test(line)) type = "Credit Card";
-      else if (/overdraft|od/i.test(line)) type = "Overdraft";
-      else if (/vehicle|auto/i.test(line)) type = "Auto / Vehicle Loan";
+
+      if (/loan on credit card|loan against credit card/i.test(line)) {
+        type = "Loan on Credit Card";
+      } else if (/home loan/i.test(line)) {
+        type = "Home Loan";
+      } else if (/personal loan/i.test(line)) {
+        type = "Personal Loan";
+      } else if (/credit card/i.test(line) || /\bcard\b/i.test(line)) {
+        type = "Credit Card";
+      } else if (/overdraft|od/i.test(line)) {
+        type = "Overdraft";
+      } else if (/vehicle|auto/i.test(line)) {
+        type = "Auto / Vehicle Loan";
+      }
 
       let status = "Unknown";
       const windowText = (line + " " + (lines[i + 1] || "")).toLowerCase();
@@ -124,8 +133,17 @@ export function parseBureauReport(rawText) {
     // ---------- AMOUNT EXTRACTION FOR TOTALS ----------
     // Decide if nearby context is a card or loan
     const windowLines = recent.join(" ").toLowerCase();
-    const isCardContext = cardKeywords.some(k => windowLines.includes(k));
-    const isLoanContext = !isCardContext && loanKeywords.some(k => windowLines.includes(k));
+
+    // Explicitly detect Loan on Credit Card contexts
+    const isLoanOnCcContext =
+      /loan on credit card|loan against credit card/i.test(windowLines);
+
+    // Treat Loan on CC as loan, not card
+    const isCardContext =
+      !isLoanOnCcContext && cardKeywords.some(k => windowLines.includes(k));
+
+    const isLoanContext =
+      isLoanOnCcContext || (!isCardContext && loanKeywords.some(k => windowLines.includes(k)));
 
     // Current Balance / Outstanding
     if (/current balance|curr balance|outstanding balance|amt outstanding|amount outstanding/i.test(lower)) {
@@ -134,7 +152,7 @@ export function parseBureauReport(rawText) {
         const amt = parseAmount(amtMatch[amtMatch.length - 1]);
         if (isCardContext) {
           totalCardOutstanding += amt;
-        } else {
+        } else if (isLoanContext) {
           totalLoanOutstanding += amt;
         }
       }
@@ -147,7 +165,7 @@ export function parseBureauReport(rawText) {
         const amt = parseAmount(amtMatch[amtMatch.length - 1]);
         if (isCardContext) {
           totalCardLimit += amt;
-        } else {
+        } else if (isLoanContext) {
           totalLoanSanctioned += amt;
         }
       }
