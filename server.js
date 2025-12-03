@@ -22,23 +22,11 @@ const openai = new OpenAI({
 });
 
 // ---------- Utility Helpers ----------
-
-// UPDATED: parse only the FIRST proper number token, not all digits.
-// This prevents "22,990 0" from becoming 229900.
 function parseAmount(str) {
-  if (str === null || str === undefined) return 0;
-  const s = String(str);
-
-  // Match first number like: 12,345.67 or 12345 or -1,234 etc.
-  const m = s.match(/-?\d{1,3}(?:,\d{3})*(?:\.\d+)?|-?\d+(?:\.\d+)?/);
-  if (!m) return 0;
-
-  const num = parseFloat(m[0].replace(/,/g, ""));
+  if (!str) return 0;
+  const cleaned = String(str).replace(/[^0-9.-]/g, "");
+  const num = parseFloat(cleaned);
   return Number.isFinite(num) ? num : 0;
-}
-
-function escapeRegExp(str) {
-  return String(str).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 // ---------- OCR SPACE ----------
@@ -83,8 +71,8 @@ function extractTotalCurrentBalance(text) {
   const t = text.replace(/\r/g, "").replace(/\u00a0/g, " ");
 
   const patterns = [
-    /Total\s+Current\s+Bal\.?\s*amt[^\d]{0,30}([\d,]+(?:\.\d+)?)/i,
-    /Total\s+Current\s+Balance[^\d]{0,30}([\d,]+(?:\.\d+)?)/i,
+    /Total\s+Current\s+Bal\.?\s*amt[^\d]{0,30}([\d,]+)/i,
+    /Total\s+Current\s+Balance[^\d]{0,30}([\d,]+)/i,
   ];
 
   for (const re of patterns) {
@@ -177,6 +165,7 @@ ${extractedText}
       format: {
         type: "json_schema",
         name: "bureau_summary_with_details",
+        strict: true,
         schema: {
           type: "object",
           properties: {
@@ -287,7 +276,7 @@ ${extractedText}
   const raw = response.output[0].content[0].text;
   let parsed = JSON.parse(raw);
 
-  // Normalize core fields
+  // Normalize
   parsed.score = typeof parsed.score === "number" ? parsed.score : 0;
   parsed.enquiryCount =
     typeof parsed.enquiryCount === "number" ? parsed.enquiryCount : 0;
@@ -305,14 +294,10 @@ ${extractedText}
   parsed.totals.loanSanctioned = parseAmount(parsed.totals.loanSanctioned);
   parsed.totals.loanOutstanding = parseAmount(parsed.totals.loanOutstanding);
   parsed.totals.cardLimit = parseAmount(parsed.totals.cardLimit);
-  parsed.totals.cardOutstanding = parseAmount(
-    parsed.totals.cardOutstanding
-  );
+  parsed.totals.cardOutstanding = parseAmount(parsed.totals.cardOutstanding);
 
   parsed.loans = Array.isArray(parsed.loans) ? parsed.loans : [];
-  parsed.enquiries = Array.isArray(parsed.enquiries)
-    ? parsed.enquiries
-    : [];
+  parsed.enquiries = Array.isArray(parsed.enquiries) ? parsed.enquiries : [];
 
   parsed.loans = parsed.loans.map((l) => ({
     ...l,
@@ -320,106 +305,6 @@ ${extractedText}
   }));
 
   return parsed;
-}
-
-/**
- * Override loan-level amounts (sanctionAmount, currentBalance, amountOverdue)
- * directly from the raw PDF text using the Account Number blocks.
- * This fixes cases where the AI mis-reads amounts.
- */
-function overrideLoanAmountsFromText(ai, extractedText) {
-  if (!ai || !Array.isArray(ai.loans)) return ai;
-
-  const t = extractedText.replace(/\r/g, " ").replace(/\u00a0/g, " ");
-
-  ai.loans = ai.loans.map((loan) => {
-    const d = loan.details || {};
-    const acct = d.accountNumber ? String(d.accountNumber).trim() : "";
-
-    if (!acct) {
-      return loan;
-    }
-
-    const escAcct = escapeRegExp(acct);
-
-    // Try to capture the full "Account Number ... Sanctioned Amt ... Current Balance ... Amount Overdue" chunk
-    const blockRegex = new RegExp(
-      `Account\\s+Number\\s+${escAcct}[\\s\\S]{0,260}?` +
-        `(?:Sanctioned\\s+Amt|Credit\\s+Limit\\s+Amt|Highest\\s+Credit)\\s+([^\\n]+?)` +
-        `[\\s\\S]{0,120}?Current\\s+Balance\\s+([^\\n]+?)` +
-        `[\\s\\S]{0,120}?Amount\\s+Overdue\\s+([^\\n]+?)`,
-      "i"
-    );
-
-    let m = t.match(blockRegex);
-
-    // If we don't get all three numbers in one shot, fall back to separate patterns
-    if (!m) {
-      const sancPatterns = [
-        new RegExp(
-          `Account\\s+Number\\s+${escAcct}[\\s\\S]{0,220}?Sanctioned\\s+Amt\\s+([^\\n]+?)`,
-          "i"
-        ),
-        new RegExp(
-          `Account\\s+Number\\s+${escAcct}[\\s\\S]{0,220}?Credit\\s+Limit\\s+Amt\\s+([^\\n]+?)`,
-          "i"
-        ),
-        new RegExp(
-          `Account\\s+Number\\s+${escAcct}[\\s\\S]{0,220}?Highest\\s+Credit\\s+([^\\n]+?)`,
-          "i"
-        ),
-      ];
-      const currRegex = new RegExp(
-        `Account\\s+Number\\s+${escAcct}[\\s\\S]{0,260}?Current\\s+Balance\\s+([^\\n]+?)`,
-        "i"
-      );
-      const odRegex = new RegExp(
-        `Account\\s+Number\\s+${escAcct}[\\s\\S]{0,260}?Amount\\s+Overdue\\s+([^\\n]+?)`,
-        "i"
-      );
-
-      let sanc = null;
-      for (const re of sancPatterns) {
-        const s = t.match(re);
-        if (s && s[1]) {
-          sanc = s[1];
-          break;
-        }
-      }
-      const curr = t.match(currRegex);
-      const od = t.match(odRegex);
-
-      const sancVal = sanc ? parseAmount(sanc) : d.sanctionAmount || 0;
-      const currVal = curr && curr[1] ? parseAmount(curr[1]) : d.currentBalance || 0;
-      const odVal = od && od[1] ? parseAmount(od[1]) : d.amountOverdue || 0;
-
-      return {
-        ...loan,
-        details: {
-          ...d,
-          sanctionAmount: sancVal,
-          currentBalance: currVal,
-          amountOverdue: odVal,
-        },
-      };
-    }
-
-    const sancVal = parseAmount(m[1]);
-    const currVal = parseAmount(m[2]);
-    const odVal = parseAmount(m[3]);
-
-    return {
-      ...loan,
-      details: {
-        ...d,
-        sanctionAmount: sancVal,
-        currentBalance: currVal,
-        amountOverdue: odVal,
-      },
-    };
-  });
-
-  return ai;
 }
 
 // =====================================================
@@ -449,9 +334,7 @@ app.post("/analyze", upload.single("pdf"), async (req, res) => {
           extractedText = ocrText;
           console.log("OCR text length:", extractedText.length);
         } else {
-          console.warn(
-            "OCR returned too little text, keeping original extracted text"
-          );
+          console.warn("OCR returned too little text, keeping original extracted text");
         }
       } catch (ocrErr) {
         console.error("OCR Error:", ocrErr);
@@ -490,14 +373,17 @@ app.post("/analyze", upload.single("pdf"), async (req, res) => {
       });
     }
 
-    // 1.5) Fix per-loan amounts from raw text
-    ai = overrideLoanAmountsFromText(ai, extractedText);
-
     // 2) Override OUTSTANDING total with Total Current Bal. amt
     const totalCurrentBal = extractTotalCurrentBalance(extractedText);
     if (!ai.totals) ai.totals = {};
     ai.totals.loanOutstanding =
       totalCurrentBal || ai.totals.loanOutstanding || 0;
+
+    // NOTE:
+    // We no longer do a second AI call for sanctioned sum.
+    // Frontend already computes:
+    //  - Sanctioned = sum of sanctionAmount for ACTIVE loans (from ai.loans.details)
+    //  - Credit card totals from ACTIVE credit card accounts.
 
     res.json({
       success: true,
