@@ -1,5 +1,5 @@
 /* ===========================================================
-   KALKI FINSERV – AI BUREAU PARSER BACKEND (ANALYZE + CHAT)
+   KALKI FINSERV – AI BUREAU PARSER BACKEND (SINGLE AI CALL)
    =========================================================== */
 
 import express from "express";
@@ -165,7 +165,6 @@ ${extractedText}
       format: {
         type: "json_schema",
         name: "bureau_summary_with_details",
-        strict: true,
         schema: {
           type: "object",
           properties: {
@@ -370,7 +369,7 @@ app.post("/analyze", upload.single("pdf"), async (req, res) => {
       // Make rate-limit error more friendly
       if (msg.includes("Rate limit")) {
         msg =
-          "Our AI engine is temporarily busy. Please wait a bit and try again.";
+          "Our AI engine is temporarily busy. Please wait 20–30 seconds and try again.";
       }
 
       return res.json({
@@ -411,44 +410,46 @@ app.post("/analyze", upload.single("pdf"), async (req, res) => {
 });
 
 // =====================================================
-// CHAT ENDPOINT: /chat  (for Kalki AI fallback answers)
+// CHAT ENDPOINT: /chat
 // =====================================================
 app.post("/chat", async (req, res) => {
   try {
     const { question, analysis, extras } = req.body || {};
 
     if (!question || typeof question !== "string") {
-      return res.status(400).json({
+      return res.json({
         success: false,
-        message: "Missing 'question' in request body.",
+        message: "Missing question for chat.",
       });
     }
 
     const safeAnalysis =
-      analysis && typeof analysis === "object" ? analysis : {};
-    const safeExtras = extras && typeof extras === "object" ? extras : {};
+      typeof analysis === "object" && analysis
+        ? analysis
+        : {};
 
-    const systemPrompt = `
+    const safeExtras =
+      typeof extras === "object" && extras
+        ? extras
+        : {};
+
+    const systemMessage = `
 You are "Kalki AI", an assistant for KalkiFinserv's Bureau Analyzer.
 
-You always receive:
-- QUESTION: natural-language query from the borrower.
-- ANALYSIS_JSON: structured data extracted from the bureau report:
-  - score
-  - loans[] (with lender, accountType, sanctionAmount, currentBalance, EMI, overdue etc.)
-  - totals (loanSanctioned, loanOutstanding, cardLimit, cardOutstanding)
-  - enquiries[]
-- EXTRAS_JSON: extra computed metrics from the frontend (e.g. total EMI, closure recommendations).
+You receive:
+- A natural language QUESTION from the borrower.
+- ANALYSIS_JSON: machine-readable bureau data (score, loans, enquiries, totals).
+- EXTRAS_JSON: optional pre-computed insights from the frontend.
 
-Rules:
-1. Use the numbers from ANALYSIS_JSON / EXTRAS_JSON whenever you talk about EMIs, FOIR, DSCR, outstanding, or closure suggestions.
-2. Do NOT invent precise rupee values that aren't supported by this data. If data is missing, speak qualitatively ("around", "roughly", "bank may differ") instead of giving fake exact figures.
-3. Prefer short, practical answers with bullet points where useful.
-4. Speak like a simple loan advisor, not like a technical AI model.
-5. If the question is unrelated to loans / credit behaviour, politely bring the conversation back to credit health, closures, EMIs, and eligibility.
+Guidelines:
+- Always use the numbers from ANALYSIS_JSON / EXTRAS_JSON when talking about EMIs, totals, FOIR, DSCR or closure suggestions.
+- If EXTRAS_JSON already contains specific calculations (e.g. months to reduce outstanding, recommended loans to close), TRUST those numbers and just explain them clearly.
+- If something is missing, you may answer qualitatively (rules of thumb, next steps), but DO NOT invent precise rupee amounts or exact EMI breakdowns.
+- Keep answers short, practical, and in plain English. Use bullet points when helpful.
+- Don't mention JSON, prompts, or that you are an AI model. Speak as a simple loan advisor.
 `;
 
-    const userContent = `
+    const userMessage = `
 QUESTION:
 ${question}
 
@@ -462,25 +463,21 @@ ${JSON.stringify(safeExtras, null, 2)}
     const response = await openai.responses.create({
       model: "gpt-4.1-mini",
       input: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userContent },
+        { role: "system", content: systemMessage },
+        { role: "user", content: userMessage },
       ],
     });
 
     const answer =
-      response.output_text ||
       response.output?.[0]?.content?.[0]?.text ||
-      "Sorry, I wasn’t able to generate a proper reply.";
+      "Sorry, I was not able to prepare a proper reply.";
 
-    return res.json({
-      success: true,
-      answer,
-    });
+    res.json({ success: true, answer });
   } catch (err) {
     console.error("Error in /chat:", err);
-    return res.status(500).json({
+    res.json({
       success: false,
-      message: "Error while generating AI chat response.",
+      message: "Error while generating chat response.",
     });
   }
 });
