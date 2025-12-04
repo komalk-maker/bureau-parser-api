@@ -1,5 +1,6 @@
 /* ===========================================================
    KALKI FINSERV – AI BUREAU PARSER BACKEND (SINGLE AI CALL)
+   + /chat ROUTE FOR NATURAL LANGUAGE ANSWERS
    =========================================================== */
 
 import express from "express";
@@ -165,6 +166,7 @@ ${extractedText}
       format: {
         type: "json_schema",
         name: "bureau_summary_with_details",
+        strict: true,
         schema: {
           type: "object",
           properties: {
@@ -273,7 +275,7 @@ ${extractedText}
   });
 
   const raw = response.output[0].content[0].text;
-  let parsed = JSON.parse(raw);
+  let parsed = JSON.parse(raw || "{}");
 
   // Normalize
   parsed.score = typeof parsed.score === "number" ? parsed.score : 0;
@@ -293,14 +295,10 @@ ${extractedText}
   parsed.totals.loanSanctioned = parseAmount(parsed.totals.loanSanctioned);
   parsed.totals.loanOutstanding = parseAmount(parsed.totals.loanOutstanding);
   parsed.totals.cardLimit = parseAmount(parsed.totals.cardLimit);
-  parsed.totals.cardOutstanding = parseAmount(
-    parsed.totals.cardOutstanding
-  );
+  parsed.totals.cardOutstanding = parseAmount(parsed.totals.cardOutstanding);
 
   parsed.loans = Array.isArray(parsed.loans) ? parsed.loans : [];
-  parsed.enquiries = Array.isArray(parsed.enquiries)
-    ? parsed.enquiries
-    : [];
+  parsed.enquiries = Array.isArray(parsed.enquiries) ? parsed.enquiries : [];
 
   parsed.loans = parsed.loans.map((l) => ({
     ...l,
@@ -384,12 +382,6 @@ app.post("/analyze", upload.single("pdf"), async (req, res) => {
     ai.totals.loanOutstanding =
       totalCurrentBal || ai.totals.loanOutstanding || 0;
 
-    // NOTE:
-    // We no longer do a second AI call for sanctioned sum.
-    // Frontend already computes:
-    //  - Sanctioned = sum of sanctionAmount for ACTIVE loans (from ai.loans.details)
-    //  - Credit card totals from ACTIVE credit card accounts.
-
     res.json({
       success: true,
       message: "PDF parsed successfully",
@@ -409,75 +401,101 @@ app.post("/analyze", upload.single("pdf"), async (req, res) => {
   }
 });
 
-// =====================================================
-// CHAT ENDPOINT: /chat
-// =====================================================
+/* ===========================================================
+   /chat – Natural language Q&A about this bureau report
+   (for later OpenAI-powered fallback from your frontend chat)
+   =========================================================== */
+
 app.post("/chat", async (req, res) => {
   try {
-    const { question, analysis, extras } = req.body || {};
+    const { question, bureauSummary, loans, totals, userProfile } = req.body || {};
 
     if (!question || typeof question !== "string") {
-      return res.json({
+      return res.status(400).json({
         success: false,
-        message: "Missing question for chat.",
+        message: "Question is required.",
       });
     }
 
-    const safeAnalysis =
-      typeof analysis === "object" && analysis
-        ? analysis
-        : {};
+    if (!process.env.OPENAI_API_KEY) {
+      return res.json({
+        success: false,
+        message: "OPENAI_API_KEY not configured on server.",
+      });
+    }
 
-    const safeExtras =
-      typeof extras === "object" && extras
-        ? extras
-        : {};
+    // Trim loans for token safety – keep only relevant fields
+    const safeLoans = Array.isArray(loans)
+      ? loans.map((l) => ({
+          lender: l.lender || "",
+          product: l.product || "",
+          status: l.status || "",
+          sanctionAmount: Number(l.sanctionAmount || 0),
+          currentBalance: Number(l.currentBalance || 0),
+          roi: l.roi != null ? Number(l.roi) : null,
+          remainingTenureMonths:
+            l.remainingTenureMonths != null ? Number(l.remainingTenureMonths) : null,
+          approxEmi: l.approxEmi != null ? Number(l.approxEmi) : null,
+          isCreditCard: !!l.isCreditCard,
+        }))
+      : [];
 
-    const systemMessage = `
-You are "Kalki AI", an assistant for KalkiFinserv's Bureau Analyzer.
+    const safeTotals = totals || {};
+    const safeProfile = userProfile || {};
 
-You receive:
+    const contextJson = JSON.stringify(
+      {
+        bureauSummary,
+        totals: safeTotals,
+        loans: safeLoans,
+        userProfile: safeProfile,
+      },
+      null,
+      2
+    );
+
+    const chatPrompt = `
+You are an expert Indian retail lending & credit bureau advisor.
+You will receive:
 - A natural language QUESTION from the borrower.
-- ANALYSIS_JSON: machine-readable bureau data (score, loans, enquiries, totals).
-- EXTRAS_JSON: optional pre-computed insights from the frontend.
+- Structured JSON data with their bureau loans, EMIs, ROI, remaining tenures and totals.
 
-Guidelines:
-- Always use the numbers from ANALYSIS_JSON / EXTRAS_JSON when talking about EMIs, totals, FOIR, DSCR or closure suggestions.
-- If EXTRAS_JSON already contains specific calculations (e.g. months to reduce outstanding, recommended loans to close), TRUST those numbers and just explain them clearly.
-- If something is missing, you may answer qualitatively (rules of thumb, next steps), but DO NOT invent precise rupee amounts or exact EMI breakdowns.
-- Keep answers short, practical, and in plain English. Use bullet points when helpful.
-- Don't mention JSON, prompts, or that you are an AI model. Speak as a simple loan advisor.
-`;
+GOALS:
+1) Answer the question precisely and numerically wherever possible.
+2) Use FOIR (for salaried) and DSCR (for business) concepts correctly.
+3) When asked "which loans to close first" or "which 2 loans should I close first",
+   prioritise loans with:
+   - High ROI,
+   - High remaining interest cost vs outstanding,
+   - Small ticket / shorter remaining tenure (easier to prepay).
+4) If info is missing, clearly state your assumption instead of guessing silently.
+5) Answer in simple, conversational English with Indian context (₹, lakhs, months).
 
-    const userMessage = `
+Return ONLY the final answer text. Do not return JSON.
+
 QUESTION:
 ${question}
 
-ANALYSIS_JSON:
-${JSON.stringify(safeAnalysis, null, 2)}
-
-EXTRAS_JSON:
-${JSON.stringify(safeExtras, null, 2)}
+DATA (for reference):
+${contextJson}
 `;
 
     const response = await openai.responses.create({
       model: "gpt-4.1-mini",
-      input: [
-        { role: "system", content: systemMessage },
-        { role: "user", content: userMessage },
-      ],
+      input: chatPrompt,
     });
 
-    const answer =
-      response.output?.[0]?.content?.[0]?.text ||
-      "Sorry, I was not able to prepare a proper reply.";
+    const answer = response.output?.[0]?.content?.[0]?.text || "Sorry, I couldn't draft a reply.";
 
-    res.json({ success: true, answer });
+    return res.json({
+      success: true,
+      answer,
+    });
   } catch (err) {
     console.error("Error in /chat:", err);
-    res.json({
+    return res.json({
       success: false,
-      message: "Error while generating chat response.",
+      message: "Error while generating AI answer.",
     });
   }
 });
