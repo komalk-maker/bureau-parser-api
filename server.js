@@ -1,5 +1,5 @@
 /* ===========================================================
-   KALKI FINSERV – AI BUREAU PARSER BACKEND (SINGLE AI CALL)
+   KALKI FINSERV – AI BUREAU PARSER BACKEND (ANALYZE + CHAT)
    =========================================================== */
 
 import express from "express";
@@ -294,10 +294,14 @@ ${extractedText}
   parsed.totals.loanSanctioned = parseAmount(parsed.totals.loanSanctioned);
   parsed.totals.loanOutstanding = parseAmount(parsed.totals.loanOutstanding);
   parsed.totals.cardLimit = parseAmount(parsed.totals.cardLimit);
-  parsed.totals.cardOutstanding = parseAmount(parsed.totals.cardOutstanding);
+  parsed.totals.cardOutstanding = parseAmount(
+    parsed.totals.cardOutstanding
+  );
 
   parsed.loans = Array.isArray(parsed.loans) ? parsed.loans : [];
-  parsed.enquiries = Array.isArray(parsed.enquiries) ? parsed.enquiries : [];
+  parsed.enquiries = Array.isArray(parsed.enquiries)
+    ? parsed.enquiries
+    : [];
 
   parsed.loans = parsed.loans.map((l) => ({
     ...l,
@@ -334,7 +338,9 @@ app.post("/analyze", upload.single("pdf"), async (req, res) => {
           extractedText = ocrText;
           console.log("OCR text length:", extractedText.length);
         } else {
-          console.warn("OCR returned too little text, keeping original extracted text");
+          console.warn(
+            "OCR returned too little text, keeping original extracted text"
+          );
         }
       } catch (ocrErr) {
         console.error("OCR Error:", ocrErr);
@@ -364,7 +370,7 @@ app.post("/analyze", upload.single("pdf"), async (req, res) => {
       // Make rate-limit error more friendly
       if (msg.includes("Rate limit")) {
         msg =
-          "Our AI engine is temporarily busy. Please wait 20–30 seconds and try again.";
+          "Our AI engine is temporarily busy. Please wait a bit and try again.";
       }
 
       return res.json({
@@ -401,6 +407,81 @@ app.post("/analyze", upload.single("pdf"), async (req, res) => {
         console.error("File cleanup error:", cleanupErr);
       }
     }
+  }
+});
+
+// =====================================================
+// CHAT ENDPOINT: /chat  (for Kalki AI fallback answers)
+// =====================================================
+app.post("/chat", async (req, res) => {
+  try {
+    const { question, analysis, extras } = req.body || {};
+
+    if (!question || typeof question !== "string") {
+      return res.status(400).json({
+        success: false,
+        message: "Missing 'question' in request body.",
+      });
+    }
+
+    const safeAnalysis =
+      analysis && typeof analysis === "object" ? analysis : {};
+    const safeExtras = extras && typeof extras === "object" ? extras : {};
+
+    const systemPrompt = `
+You are "Kalki AI", an assistant for KalkiFinserv's Bureau Analyzer.
+
+You always receive:
+- QUESTION: natural-language query from the borrower.
+- ANALYSIS_JSON: structured data extracted from the bureau report:
+  - score
+  - loans[] (with lender, accountType, sanctionAmount, currentBalance, EMI, overdue etc.)
+  - totals (loanSanctioned, loanOutstanding, cardLimit, cardOutstanding)
+  - enquiries[]
+- EXTRAS_JSON: extra computed metrics from the frontend (e.g. total EMI, closure recommendations).
+
+Rules:
+1. Use the numbers from ANALYSIS_JSON / EXTRAS_JSON whenever you talk about EMIs, FOIR, DSCR, outstanding, or closure suggestions.
+2. Do NOT invent precise rupee values that aren't supported by this data. If data is missing, speak qualitatively ("around", "roughly", "bank may differ") instead of giving fake exact figures.
+3. Prefer short, practical answers with bullet points where useful.
+4. Speak like a simple loan advisor, not like a technical AI model.
+5. If the question is unrelated to loans / credit behaviour, politely bring the conversation back to credit health, closures, EMIs, and eligibility.
+`;
+
+    const userContent = `
+QUESTION:
+${question}
+
+ANALYSIS_JSON:
+${JSON.stringify(safeAnalysis, null, 2)}
+
+EXTRAS_JSON:
+${JSON.stringify(safeExtras, null, 2)}
+`;
+
+    const response = await openai.responses.create({
+      model: "gpt-4.1-mini",
+      input: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userContent },
+      ],
+    });
+
+    const answer =
+      response.output_text ||
+      response.output?.[0]?.content?.[0]?.text ||
+      "Sorry, I wasn’t able to generate a proper reply.";
+
+    return res.json({
+      success: true,
+      answer,
+    });
+  } catch (err) {
+    console.error("Error in /chat:", err);
+    return res.status(500).json({
+      success: false,
+      message: "Error while generating AI chat response.",
+    });
   }
 });
 
