@@ -432,7 +432,7 @@ app.post("/analyze", upload.single("pdf"), async (req, res) => {
 });
 
 // =====================================================
-// CHAT ENDPOINT: /chat
+// CHAT ENDPOINT: /chat  (Existing bureau Q&A assistant)
 // =====================================================
 app.post("/chat", async (req, res) => {
   try {
@@ -444,6 +444,62 @@ app.post("/chat", async (req, res) => {
         message: "Missing question for chat.",
       });
     }
+
+    const safeAnalysis =
+      typeof analysis === "object" && analysis ? analysis : {};
+
+    const safeExtras =
+      typeof extras === "object" && extras ? extras : {};
+
+    const systemMessage = `
+You are "Kalki AI", an assistant for KalkiFinserv's Bureau Analyzer.
+
+You receive:
+- A natural language QUESTION from the borrower.
+- ANALYSIS_JSON: machine-readable bureau data (score, loans, enquiries, totals).
+- EXTRAS_JSON: optional pre-computed insights from the frontend.
+
+Guidelines:
+- Always use the numbers from ANALYSIS_JSON / EXTRAS_JSON when talking about EMIs, totals, FOIR, DSCR or closure suggestions.
+- If EXTRAS_JSON already contains specific calculations (e.g. months to reduce outstanding, recommended loans to close), TRUST those numbers and just explain them clearly.
+- If something is missing, you may answer qualitatively (rules of thumb, next steps), but DO NOT invent precise rupee amounts or exact EMI breakdowns.
+- Keep answers short, practical, and in plain English. Use bullet points when helpful.
+- Don't mention JSON, prompts, or that you are an AI model. Speak as a simple loan advisor.
+`;
+
+    const userMessage = `
+QUESTION:
+${question}
+
+ANALYSIS_JSON:
+${JSON.stringify(safeAnalysis, null, 2)}
+
+EXTRAS_JSON:
+${JSON.stringify(safeExtras, null, 2)}
+`;
+
+    const response = await openai.responses.create({
+      model: "gpt-4.1-mini",
+      input: [
+        { role: "system", content: systemMessage },
+        { role: "user", content: userMessage },
+      ],
+    });
+
+    const answer =
+      response.output?.[0]?.content?.[0]?.text ||
+      "Sorry, I was not able to prepare a proper reply.";
+
+    res.json({ success: true, answer });
+  } catch (err) {
+    console.error("Error in /chat:", err);
+    res.json({
+      success: false,
+      message: "Error while generating chat response.",
+    });
+  }
+});
+
 // =====================================================
 // GOVT SCHEME CHAT (3 PDFs only, via file_search)
 // =====================================================
@@ -509,72 +565,15 @@ FORMAT:
       temperature: 0.2,
     });
 
-    const answer = extractResponseText(response) || "I could not generate a reply.";
+    const answer =
+      extractResponseText(response) || "I could not generate a reply.";
+
     return res.json({ success: true, answer });
   } catch (err) {
     console.error("Error in /govt-schemes-chat:", err);
     return res.json({
       success: false,
       message: "Error while generating govt scheme chat response.",
-    });
-  }
-});
-
-    const safeAnalysis =
-      typeof analysis === "object" && analysis
-        ? analysis
-        : {};
-
-    const safeExtras =
-      typeof extras === "object" && extras
-        ? extras
-        : {};
-
-    const systemMessage = `
-You are "Kalki AI", an assistant for KalkiFinserv's Bureau Analyzer.
-
-You receive:
-- A natural language QUESTION from the borrower.
-- ANALYSIS_JSON: machine-readable bureau data (score, loans, enquiries, totals).
-- EXTRAS_JSON: optional pre-computed insights from the frontend.
-
-Guidelines:
-- Always use the numbers from ANALYSIS_JSON / EXTRAS_JSON when talking about EMIs, totals, FOIR, DSCR or closure suggestions.
-- If EXTRAS_JSON already contains specific calculations (e.g. months to reduce outstanding, recommended loans to close), TRUST those numbers and just explain them clearly.
-- If something is missing, you may answer qualitatively (rules of thumb, next steps), but DO NOT invent precise rupee amounts or exact EMI breakdowns.
-- Keep answers short, practical, and in plain English. Use bullet points when helpful.
-- Don't mention JSON, prompts, or that you are an AI model. Speak as a simple loan advisor.
-`;
-
-    const userMessage = `
-QUESTION:
-${question}
-
-ANALYSIS_JSON:
-${JSON.stringify(safeAnalysis, null, 2)}
-
-EXTRAS_JSON:
-${JSON.stringify(safeExtras, null, 2)}
-`;
-
-    const response = await openai.responses.create({
-      model: "gpt-4.1-mini",
-      input: [
-        { role: "system", content: systemMessage },
-        { role: "user", content: userMessage },
-      ],
-    });
-
-    const answer =
-      response.output?.[0]?.content?.[0]?.text ||
-      "Sorry, I was not able to prepare a proper reply.";
-
-    res.json({ success: true, answer });
-  } catch (err) {
-    console.error("Error in /chat:", err);
-    res.json({
-      success: false,
-      message: "Error while generating chat response.",
     });
   }
 });
