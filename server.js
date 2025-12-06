@@ -20,6 +20,28 @@ const upload = multer({ dest: "uploads/" });
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
+// Vector store for Govt scheme PDFs
+const GOVT_VECTOR_ID = process.env.GOVT_SCHEMES_VECTOR_STORE_ID;
+
+// Helper to pull plain text out of Responses API output
+function extractResponseText(resp) {
+  if (!resp || !resp.output) return "";
+  const chunks = [];
+  for (const item of resp.output) {
+    if (!item.content) continue;
+    for (const c of item.content) {
+      // new style
+      if (c.type === "output_text" && c.text?.value) {
+        chunks.push(c.text.value);
+      }
+      // fallback
+      else if (c.type === "text" && typeof c.text === "string") {
+        chunks.push(c.text);
+      }
+    }
+  }
+  return chunks.join("\n\n");
+}
 
 // ---------- Utility Helpers ----------
 function parseAmount(str) {
