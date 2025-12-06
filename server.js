@@ -444,6 +444,81 @@ app.post("/chat", async (req, res) => {
         message: "Missing question for chat.",
       });
     }
+// =====================================================
+// GOVT SCHEME CHAT (3 PDFs only, via file_search)
+// =====================================================
+app.post("/govt-schemes-chat", async (req, res) => {
+  try {
+    if (!GOVT_VECTOR_ID) {
+      return res.json({
+        success: false,
+        message:
+          "Govt schemes vector store not configured. Set GOVT_SCHEMES_VECTOR_STORE_ID in env.",
+      });
+    }
+
+    const { messages } = req.body || {};
+
+    // Expect an array like [{ role: "user", content: "..." }, ...]
+    if (!Array.isArray(messages) || messages.length === 0) {
+      return res.json({
+        success: false,
+        message: "Missing messages array for govt schemes chat.",
+      });
+    }
+
+    const systemPrompt = `
+You are "Kalki Govt Scheme Assistant" for Indian Government loan/subsidy/guarantee schemes.
+
+KNOWLEDGE:
+- You are ONLY allowed to use information from the three indexed PDFs provided by KalkiFinserv.
+- You access those PDFs through the 'file_search' tool and must NOT use any outside knowledge.
+- If the PDFs do not clearly cover something, say: "I don't see this clearly in the scheme documents" and stop. Do NOT guess.
+
+BEHAVIOUR:
+- Understand natural language questions in English, Hinglish and simple Indian language mix.
+- When user asks about a specific scheme, use file_search to find that scheme's section and answer:
+  • Eligibility
+  • Documents required
+  • Benefits / subsidy / guarantee coverage / interest subvention
+  • ROI (if written in the PDFs)
+  • Tenure, security/collateral, exclusions, claim/settlement process
+- When user says "Any scheme for me?" or similar:
+  • Ask 2–3 short questions (who are they – MSME/farmer/student/SHG/home buyer etc., loan amount, purpose)
+  • Then search in PDFs and suggest 1–3 schemes with brief reasoning, strictly based on the documents.
+- When mentioning numbers (subsidy %, max loan, guarantee cover etc.) copy them exactly from the PDFs. Never invent.
+
+FORMAT:
+- Answer in clear paragraphs and bullet points.
+- Do not mention tools, file_search, PDFs or that you are an AI.
+`;
+
+    const response = await openai.responses.create({
+      model: "gpt-4.1-mini",
+      input: [
+        { role: "system", content: systemPrompt },
+        ...messages, // [{role, content}, ...] from frontend
+      ],
+      tools: [{ type: "file_search" }],
+      tool_config: {
+        file_search: {
+          vector_store_ids: [GOVT_VECTOR_ID],
+        },
+      },
+      max_output_tokens: 900,
+      temperature: 0.2,
+    });
+
+    const answer = extractResponseText(response) || "I could not generate a reply.";
+    return res.json({ success: true, answer });
+  } catch (err) {
+    console.error("Error in /govt-schemes-chat:", err);
+    return res.json({
+      success: false,
+      message: "Error while generating govt scheme chat response.",
+    });
+  }
+});
 
     const safeAnalysis =
       typeof analysis === "object" && analysis
