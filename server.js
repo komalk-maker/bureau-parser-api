@@ -553,7 +553,7 @@ FORMAT:
       model: "gpt-4.1-mini",
       input: [
         { role: "system", content: systemPrompt },
-        ...messages, // [{role, content}, ...] from frontend
+        ...messages,
       ],
       tools: [{ type: "file_search" }],
       tool_config: {
@@ -565,9 +565,7 @@ FORMAT:
       temperature: 0.2,
     });
 
-    const answer =
-      extractResponseText(response) || "I could not generate a reply.";
-
+    const answer = extractResponseText(response) || "I could not generate a reply.";
     return res.json({ success: true, answer });
   } catch (err) {
     console.error("Error in /govt-schemes-chat:", err);
