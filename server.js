@@ -1,7 +1,8 @@
 /* ===========================================================
    KALKI FINSERV – AI BUREAU PARSER BACKEND (SINGLE AI CALL)
-   Patched to extract rateOfInterest, repaymentTenure, totalWriteOffAmount,
-   principalWriteOff and settlementAmount per loan.
+   Patched schema fix: details.properties required list includes all keys.
+   Also extracts/normalizes: rateOfInterest, repaymentTenure,
+   totalWriteOffAmount, principalWriteOff, settlementAmount per loan.
    =========================================================== */
 
 import express from "express";
@@ -48,15 +49,12 @@ function extractResponseText(resp) {
 // ---------- Utility Helpers ----------
 function parseAmount(str) {
   if (str == null) return 0;
-  // Accept numbers or strings like "12.050", "₹1,23,456.00", "12.05 %", "12.05 p.a."
   const s = String(str).trim();
-  // Extract first number-like substring (allow decimals, negative)
   const m = s.match(/-?\d+(\.\d+)?/);
   if (m) {
     const num = parseFloat(m[0]);
     return Number.isFinite(num) ? num : 0;
   }
-  // fallback: remove non-digit except dot, minus
   const cleaned = s.replace(/[^0-9.-]/g, "");
   const num = parseFloat(cleaned);
   return Number.isFinite(num) ? num : 0;
@@ -67,16 +65,12 @@ function parseTenureToMonths(val) {
   if (val == null) return null;
   if (typeof val === "number" && Number.isFinite(val)) return Math.round(val);
   const s = String(val).trim().toLowerCase();
-  // examples: "36 months", "3 yrs", "3 years", "36", "30 m"
-  // years
-  let m = s.match(/(\d+)\s*(yr|year)/);
+  let m = s.match(/(\d+)\s*(yr|year|years)/);
   if (m) return parseInt(m[1], 10) * 12;
-  m = s.match(/(\d+)\s*(m|mo|month)/);
+  m = s.match(/(\d+)\s*(m|mo|month|months)/);
   if (m) return parseInt(m[1], 10);
-  // pure number
   m = s.match(/^(\d+)$/);
   if (m) return parseInt(m[1], 10);
-  // find any number-like
   m = s.match(/(\d+(\.\d+)?)/);
   if (m) return Math.round(parseFloat(m[1]));
   return null;
@@ -144,8 +138,6 @@ async function analyzeWithAI(extractedText) {
     throw new Error("OPENAI_API_KEY missing");
   }
 
-  // NOTE: We explicitly request the AI to look for "Rate of Interest" and
-  // other fields inside the "CREDIT ACCOUNT INFORMATION DETAILS" block.
   const prompt = `
 You are an expert reader of Indian credit bureau reports (Experian/CIBIL/CRIF/Equifax).
 
@@ -174,7 +166,7 @@ For each loan, include "details" with (where available):
   amountOverdue, emiAmount, securityOrCollateral, dpdHistory,
   rateOfInterest, repaymentTenure, totalWriteOffAmount, principalWriteOff, settlementAmount
 
-STRICT JSON shape (loans.details properties above are optional — populate when present):
+STRICT JSON shape (loans.details properties above may be null when absent):
 
 {
   "score": number,
@@ -192,25 +184,25 @@ STRICT JSON shape (loans.details properties above are optional — populate when
       "status": string,
       "line": string,
       "details": {
-        "lender": string,
-        "accountType": string,
-        "accountNumber": string,
-        "ownership": string,
-        "accountStatus": string,
-        "dateOpened": string,
-        "dateReported": string,
-        "dateClosed": string,
-        "sanctionAmount": number,
-        "currentBalance": number,
-        "amountOverdue": number,
-        "emiAmount": number,
-        "securityOrCollateral": string,
-        "dpdHistory": string,
-        "rateOfInterest": number,
-        "repaymentTenure": string,
-        "totalWriteOffAmount": number,
-        "principalWriteOff": number,
-        "settlementAmount": number
+        "lender": string | null,
+        "accountType": string | null,
+        "accountNumber": string | null,
+        "ownership": string | null,
+        "accountStatus": string | null,
+        "dateOpened": string | null,
+        "dateReported": string | null,
+        "dateClosed": string | null,
+        "sanctionAmount": number | null,
+        "currentBalance": number | null,
+        "amountOverdue": number | null,
+        "emiAmount": number | null,
+        "securityOrCollateral": string | null,
+        "dpdHistory": string | null,
+        "rateOfInterest": number | null,
+        "repaymentTenure": string | null,
+        "totalWriteOffAmount": number | null,
+        "principalWriteOff": number | null,
+        "settlementAmount": number | null
       }
     }
   ],
@@ -235,7 +227,7 @@ ${extractedText}
     text: {
       format: {
         type: "json_schema",
-        name: "bureau_summary_with_details_v2",
+        name: "bureau_summary_with_details_v2_fixed",
         schema: {
           type: "object",
           properties: {
@@ -269,29 +261,29 @@ ${extractedText}
                   details: {
                     type: "object",
                     properties: {
-                      lender: { type: "string" },
-                      accountType: { type: "string" },
-                      accountNumber: { type: "string" },
-                      ownership: { type: "string" },
-                      accountStatus: { type: "string" },
-                      dateOpened: { type: "string" },
-                      dateReported: { type: "string" },
-                      dateClosed: { type: "string" },
-                      sanctionAmount: { type: "number" },
-                      currentBalance: { type: "number" },
-                      amountOverdue: { type: "number" },
-                      emiAmount: { type: "number" },
-                      securityOrCollateral: { type: "string" },
-                      dpdHistory: { type: "string" },
+                      lender: { type: ["string", "null"] },
+                      accountType: { type: ["string", "null"] },
+                      accountNumber: { type: ["string", "null"] },
+                      ownership: { type: ["string", "null"] },
+                      accountStatus: { type: ["string", "null"] },
+                      dateOpened: { type: ["string", "null"] },
+                      dateReported: { type: ["string", "null"] },
+                      dateClosed: { type: ["string", "null"] },
+                      sanctionAmount: { type: ["number", "null"] },
+                      currentBalance: { type: ["number", "null"] },
+                      amountOverdue: { type: ["number", "null"] },
+                      emiAmount: { type: ["number", "null"] },
+                      securityOrCollateral: { type: ["string", "null"] },
+                      dpdHistory: { type: ["string", "null"] },
 
-                      // NEW optional fields:
-                      rateOfInterest: { type: "number" },
-                      repaymentTenure: { type: "string" },
-                      totalWriteOffAmount: { type: "number" },
-                      principalWriteOff: { type: "number" },
-                      settlementAmount: { type: "number" }
+                      // NEW optional fields (allow null)
+                      rateOfInterest: { type: ["number", "null"] },
+                      repaymentTenure: { type: ["string", "null"] },
+                      totalWriteOffAmount: { type: ["number", "null"] },
+                      principalWriteOff: { type: ["number", "null"] },
+                      settlementAmount: { type: ["number", "null"] }
                     },
-                    // Keep existing required list unchanged to avoid strict failure
+                    // REQUIRED must include every key declared in properties per API validation
                     required: [
                       "lender",
                       "accountType",
@@ -307,6 +299,11 @@ ${extractedText}
                       "emiAmount",
                       "securityOrCollateral",
                       "dpdHistory",
+                      "rateOfInterest",
+                      "repaymentTenure",
+                      "totalWriteOffAmount",
+                      "principalWriteOff",
+                      "settlementAmount"
                     ],
                     additionalProperties: false,
                   },
@@ -357,7 +354,6 @@ ${extractedText}
   try {
     parsed = JSON.parse(raw);
   } catch (e) {
-    // Fallback: if the AI returned a text chunk with JSON inside, try to extract JSON substring
     const candidate = raw.match(/\{[\s\S]*\}$/m);
     if (candidate) {
       try {
@@ -403,35 +399,46 @@ ${extractedText}
   parsed.loans = parsed.loans.map((l) => {
     const details = l.details || {};
 
-    // Normalize numeric fields safely
     const normalized = {
-      lender: details.lender || "",
-      accountType: details.accountType || "",
-      accountNumber: details.accountNumber || "",
-      ownership: details.ownership || "",
-      accountStatus: details.accountStatus || "",
-      dateOpened: details.dateOpened || "",
-      dateReported: details.dateReported || "",
-      dateClosed: details.dateClosed || "",
+      lender: details.lender || null,
+      accountType: details.accountType || null,
+      accountNumber: details.accountNumber || null,
+      ownership: details.ownership || null,
+      accountStatus: details.accountStatus || null,
+      dateOpened: details.dateOpened || null,
+      dateReported: details.dateReported || null,
+      dateClosed: details.dateClosed || null,
       sanctionAmount: parseAmount(details.sanctionAmount),
       currentBalance: parseAmount(details.currentBalance),
       amountOverdue: parseAmount(details.amountOverdue),
       emiAmount: parseAmount(details.emiAmount),
-      securityOrCollateral: details.securityOrCollateral || "",
-      dpdHistory: details.dpdHistory || "",
+      securityOrCollateral: details.securityOrCollateral || null,
+      dpdHistory: details.dpdHistory || null,
 
       // NEW fields (coerced)
-      rateOfInterest: parseAmount(details.rateOfInterest || details.rateOfInterest === 0 ? details.rateOfInterest : details.rateOfInterest),
-      // repaymentTenure keep original string too — also try to coerce to months
-      repaymentTenureRaw: details.repaymentTenure || details.repaymentTenure === 0 ? String(details.repaymentTenure) : "",
+      rateOfInterest: (() => {
+        // accept numeric or numeric-in-string
+        const val = details.rateOfInterest ?? details.rate_of_interest ?? details['Rate of Interest'] ?? null;
+        return val == null ? null : parseAmount(val);
+      })(),
+      repaymentTenureRaw: details.repaymentTenure ?? details.repayment_tenure ?? details.tenure ?? null,
       repaymentTenure: (() => {
         const t = details.repaymentTenure ?? details.repayment_tenure ?? details.tenure ?? null;
         const months = parseTenureToMonths(t);
         return months !== null ? months : (t ? String(t) : null);
       })(),
-      totalWriteOffAmount: parseAmount(details.totalWriteOffAmount || details.total_write_off_amount || details.totalWriteoffAmount),
-      principalWriteOff: parseAmount(details.principalWriteOff || details.principal_write_off || details.principalWriteoff),
-      settlementAmount: parseAmount(details.settlementAmount || details.settlement_amount || details.settlement)
+      totalWriteOffAmount: (() => {
+        const val = details.totalWriteOffAmount ?? details.total_write_off_amount ?? details.totalWriteoffAmount ?? null;
+        return val == null ? 0 : parseAmount(val);
+      })(),
+      principalWriteOff: (() => {
+        const val = details.principalWriteOff ?? details.principal_write_off ?? details.principalWriteoff ?? null;
+        return val == null ? 0 : parseAmount(val);
+      })(),
+      settlementAmount: (() => {
+        const val = details.settlementAmount ?? details.settlement_amount ?? details.settlement ?? null;
+        return val == null ? 0 : parseAmount(val);
+      })()
     };
 
     return {
@@ -499,7 +506,6 @@ app.post("/analyze", upload.single("pdf"), async (req, res) => {
         aiErr.message ||
         "Unknown AI error";
 
-      // Make rate-limit error more friendly
       if (msg.includes("Rate limit")) {
         msg =
           "Our AI engine is temporarily busy. Please wait 20–30 seconds and try again.";
@@ -516,12 +522,6 @@ app.post("/analyze", upload.single("pdf"), async (req, res) => {
     if (!ai.totals) ai.totals = {};
     ai.totals.loanOutstanding =
       totalCurrentBal || ai.totals.loanOutstanding || 0;
-
-    // NOTE:
-    // We no longer do a second AI call for sanctioned sum.
-    // Frontend already computes:
-    //  - Sanctioned = sum of sanctionAmount for ACTIVE loans (from ai.loans.details)
-    //  - Credit card totals from ACTIVE credit card accounts.
 
     res.json({
       success: true,
@@ -626,7 +626,6 @@ app.post("/govt-schemes-chat", async (req, res) => {
 
     const { messages } = req.body || {};
 
-    // Expect an array like [{ role: "user", content: "..." }, ...]
     if (!Array.isArray(messages) || messages.length === 0) {
       return res.json({
         success: false,
