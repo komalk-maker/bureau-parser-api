@@ -1,5 +1,7 @@
 /* ===========================================================
    KALKI FINSERV – AI BUREAU PARSER BACKEND (SINGLE AI CALL)
+   Patched to extract rateOfInterest, repaymentTenure, totalWriteOffAmount,
+   principalWriteOff and settlementAmount per loan.
    =========================================================== */
 
 import express from "express";
@@ -45,10 +47,39 @@ function extractResponseText(resp) {
 
 // ---------- Utility Helpers ----------
 function parseAmount(str) {
-  if (!str) return 0;
-  const cleaned = String(str).replace(/[^0-9.-]/g, "");
+  if (str == null) return 0;
+  // Accept numbers or strings like "12.050", "₹1,23,456.00", "12.05 %", "12.05 p.a."
+  const s = String(str).trim();
+  // Extract first number-like substring (allow decimals, negative)
+  const m = s.match(/-?\d+(\.\d+)?/);
+  if (m) {
+    const num = parseFloat(m[0]);
+    return Number.isFinite(num) ? num : 0;
+  }
+  // fallback: remove non-digit except dot, minus
+  const cleaned = s.replace(/[^0-9.-]/g, "");
   const num = parseFloat(cleaned);
   return Number.isFinite(num) ? num : 0;
+}
+
+// Normalize tenure string to integer months where possible
+function parseTenureToMonths(val) {
+  if (val == null) return null;
+  if (typeof val === "number" && Number.isFinite(val)) return Math.round(val);
+  const s = String(val).trim().toLowerCase();
+  // examples: "36 months", "3 yrs", "3 years", "36", "30 m"
+  // years
+  let m = s.match(/(\d+)\s*(yr|year)/);
+  if (m) return parseInt(m[1], 10) * 12;
+  m = s.match(/(\d+)\s*(m|mo|month)/);
+  if (m) return parseInt(m[1], 10);
+  // pure number
+  m = s.match(/^(\d+)$/);
+  if (m) return parseInt(m[1], 10);
+  // find any number-like
+  m = s.match(/(\d+(\.\d+)?)/);
+  if (m) return Math.round(parseFloat(m[1]));
+  return null;
 }
 
 // ---------- OCR SPACE ----------
@@ -113,6 +144,8 @@ async function analyzeWithAI(extractedText) {
     throw new Error("OPENAI_API_KEY missing");
   }
 
+  // NOTE: We explicitly request the AI to look for "Rate of Interest" and
+  // other fields inside the "CREDIT ACCOUNT INFORMATION DETAILS" block.
   const prompt = `
 You are an expert reader of Indian credit bureau reports (Experian/CIBIL/CRIF/Equifax).
 
@@ -124,13 +157,24 @@ Extract the following strictly in JSON:
 4) loans[] — one item per credit facility, using:
    - "SUMMARY: CREDIT ACCOUNT INFORMATION"
    - "CREDIT ACCOUNT INFORMATION DETAILS"
+   For each loan, include a details object. In addition to the usual fields,
+   attempt to extract these if present in the credit account details:
+     - rateOfInterest: numeric rate of interest (e.g. "Rate of Interest 12.050" or "Rate of Interest 12.05%")
+     - repaymentTenure: remaining / reported repayment tenure (string or numeric; months preferred)
+     - totalWriteOffAmount: numeric (if the loan has been written off, total write-off amount)
+     - principalWriteOff: numeric (principal portion that was written off)
+     - settlementAmount: numeric (settlement / compromise amount if listed)
+
 5) enquiries[] — from "CREDIT ENQUIRIES".
 6) totals — rough values (backend/frontend may override parts).
 
-For each loan, include a "details" object. For dpdHistory, output a compact month/year view like:
-"2023-01: 30, 2023-03: 60" or "" if none.
+For each loan, include "details" with (where available):
+  lender, accountType, accountNumber, ownership, accountStatus,
+  dateOpened, dateReported, dateClosed, sanctionAmount, currentBalance,
+  amountOverdue, emiAmount, securityOrCollateral, dpdHistory,
+  rateOfInterest, repaymentTenure, totalWriteOffAmount, principalWriteOff, settlementAmount
 
-STRICT JSON shape:
+STRICT JSON shape (loans.details properties above are optional — populate when present):
 
 {
   "score": number,
@@ -161,7 +205,12 @@ STRICT JSON shape:
         "amountOverdue": number,
         "emiAmount": number,
         "securityOrCollateral": string,
-        "dpdHistory": string
+        "dpdHistory": string,
+        "rateOfInterest": number,
+        "repaymentTenure": string,
+        "totalWriteOffAmount": number,
+        "principalWriteOff": number,
+        "settlementAmount": number
       }
     }
   ],
@@ -186,7 +235,7 @@ ${extractedText}
     text: {
       format: {
         type: "json_schema",
-        name: "bureau_summary_with_details",
+        name: "bureau_summary_with_details_v2",
         schema: {
           type: "object",
           properties: {
@@ -234,7 +283,15 @@ ${extractedText}
                       emiAmount: { type: "number" },
                       securityOrCollateral: { type: "string" },
                       dpdHistory: { type: "string" },
+
+                      // NEW optional fields:
+                      rateOfInterest: { type: "number" },
+                      repaymentTenure: { type: "string" },
+                      totalWriteOffAmount: { type: "number" },
+                      principalWriteOff: { type: "number" },
+                      settlementAmount: { type: "number" }
                     },
+                    // Keep existing required list unchanged to avoid strict failure
                     required: [
                       "lender",
                       "accountType",
@@ -294,10 +351,28 @@ ${extractedText}
     },
   });
 
-  const raw = response.output[0].content[0].text;
-  let parsed = JSON.parse(raw);
+  // The responses.create with json_schema returns structured output; attempt to read raw
+  const raw = response.output?.[0]?.content?.[0]?.text || extractResponseText(response);
+  let parsed = {};
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    // Fallback: if the AI returned a text chunk with JSON inside, try to extract JSON substring
+    const candidate = raw.match(/\{[\s\S]*\}$/m);
+    if (candidate) {
+      try {
+        parsed = JSON.parse(candidate[0]);
+      } catch (e2) {
+        console.error("Failed to parse AI output as JSON:", e2);
+        throw new Error("AI output parse failure");
+      }
+    } else {
+      console.error("AI output not parseable as JSON:", raw);
+      throw new Error("AI returned non-JSON output");
+    }
+  }
 
-  // Normalize
+  // Normalize and coerce numeric fields
   parsed.score = typeof parsed.score === "number" ? parsed.score : 0;
   parsed.enquiryCount =
     typeof parsed.enquiryCount === "number" ? parsed.enquiryCount : 0;
@@ -324,10 +399,46 @@ ${extractedText}
     ? parsed.enquiries
     : [];
 
-  parsed.loans = parsed.loans.map((l) => ({
-    ...l,
-    details: l.details || {},
-  }));
+  // Ensure each loan has a details object and parse newly requested fields
+  parsed.loans = parsed.loans.map((l) => {
+    const details = l.details || {};
+
+    // Normalize numeric fields safely
+    const normalized = {
+      lender: details.lender || "",
+      accountType: details.accountType || "",
+      accountNumber: details.accountNumber || "",
+      ownership: details.ownership || "",
+      accountStatus: details.accountStatus || "",
+      dateOpened: details.dateOpened || "",
+      dateReported: details.dateReported || "",
+      dateClosed: details.dateClosed || "",
+      sanctionAmount: parseAmount(details.sanctionAmount),
+      currentBalance: parseAmount(details.currentBalance),
+      amountOverdue: parseAmount(details.amountOverdue),
+      emiAmount: parseAmount(details.emiAmount),
+      securityOrCollateral: details.securityOrCollateral || "",
+      dpdHistory: details.dpdHistory || "",
+
+      // NEW fields (coerced)
+      rateOfInterest: parseAmount(details.rateOfInterest || details.rateOfInterest === 0 ? details.rateOfInterest : details.rateOfInterest),
+      // repaymentTenure keep original string too — also try to coerce to months
+      repaymentTenureRaw: details.repaymentTenure || details.repaymentTenure === 0 ? String(details.repaymentTenure) : "",
+      repaymentTenure: (() => {
+        const t = details.repaymentTenure ?? details.repayment_tenure ?? details.tenure ?? null;
+        const months = parseTenureToMonths(t);
+        return months !== null ? months : (t ? String(t) : null);
+      })(),
+      totalWriteOffAmount: parseAmount(details.totalWriteOffAmount || details.total_write_off_amount || details.totalWriteoffAmount),
+      principalWriteOff: parseAmount(details.principalWriteOff || details.principal_write_off || details.principalWriteoff),
+      settlementAmount: parseAmount(details.settlementAmount || details.settlement_amount || details.settlement)
+    };
+
+    return {
+      ...l,
+      details: normalized,
+    };
+  });
 
   return parsed;
 }
