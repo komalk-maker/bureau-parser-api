@@ -1,7 +1,7 @@
 {
   "name": "bureau-parser-api",
-  "version": "1.0.0",
-  "description": "AI-powered Bureau Report Parser for KalkiFinserv",
+  "version": "1.1.0",
+  "description": "AI-powered Bureau Report Parser + Live Lender Offers",
   "main": "server.js",
   "type": "module",
   "scripts": {
