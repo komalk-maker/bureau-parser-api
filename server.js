@@ -456,58 +456,59 @@ ${extractedText}
 async function serpSearch(bank) {
   const query = `${bank} pre approved personal loan apply online`;
 
-  const url = `https://serpapi.com/search.json?engine=google&q=${encodeURIComponent(query)}&api_key=${process.env.SERP_API_KEY}`;
+  const url = `https://serpapi.com/search.json?engine=google&q=${encodeURIComponent(
+    query
+  )}&api_key=${process.env.SERPAPI_KEY}`;
 
   try {
     const res = await fetch(url);
     const data = await res.json();
 
-    if (!data.organic_results) return [];
+    if (!data || !data.organic_results) return [];
 
     return data.organic_results;
-  
+
   } catch (err) {
     console.error("SerpAPI error:", err);
     return [];
   }
 }
 
-
 /*************************************************
- 🔵 FILTER BANK APPLY LINKS
+ 🔵 FILTER BANK APPLY LINKS (Smart Matching)
 *************************************************/
 function extractApplyLinks(bank, serpResults) {
 
   if (!serpResults || !serpResults.length) return [];
 
-  const bankDomain = bank
+  // Extract domain keyword (kotak, hdfc, icici, axis)
+  const bankKeyword = bank
     .toLowerCase()
     .replace("bank", "")
     .replace("finance", "")
     .replace("limited", "")
     .replace("ltd", "")
     .trim()
-    .split(" ")[0]; // use first name (kotak / hdfc / icici etc)
+    .split(" ")[0]; 
 
   const APPLY_KEYWORDS = [
     "apply",
     "onboarding",
     "instant",
     "insta",
-    "pl",
     "preapproved",
     "pre-approved",
-    "loan",
     "personal-loan",
-    "apply-now",
-    "instant-loan",
-    "digital"
+    "pl",
+    "loan",
+    "digital",
+    "apply-now"
   ];
 
-  const results = serpResults
+  const matches = serpResults
     .filter(r => r.link)
-    .filter(r => 
-      r.link.toLowerCase().includes(bankDomain) &&
+    .filter(r =>
+      r.link.toLowerCase().includes(bankKeyword) &&
       APPLY_KEYWORDS.some(k => r.link.toLowerCase().includes(k))
     )
     .map(r => ({
@@ -515,9 +516,8 @@ function extractApplyLinks(bank, serpResults) {
       url: r.link
     }));
 
-  return results.slice(0, 5); // max 5 links
+  return matches.slice(0, 3);
 }
-
 
 /*************************************************
  🔵 BACKEND ROUTE: /api/live-offers
@@ -530,10 +530,10 @@ app.get("/api/live-offers", async (req, res) => {
   }
 
   try {
-    // 1. Fetch Google results via SerpAPI
+    // 1. Search Google live via SerpAPI
     const serpResults = await serpSearch(bank);
 
-    // 2. Extract apply links
+    // 2. Extract Apply URLs
     const offers = extractApplyLinks(bank, serpResults);
 
     return res.json({
@@ -544,6 +544,7 @@ app.get("/api/live-offers", async (req, res) => {
 
   } catch (err) {
     console.error("Live offer error:", err);
+
     return res.json({
       success: false,
       bank,
