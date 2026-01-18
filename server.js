@@ -450,6 +450,108 @@ ${extractedText}
   return parsed;
 }
 
+/*************************************************
+ 🔵 SERPAPI LIVE OFFER SEARCH ENGINE
+*************************************************/
+async function serpSearch(bank) {
+  const query = `${bank} pre approved personal loan apply online`;
+
+  const url = `https://serpapi.com/search.json?engine=google&q=${encodeURIComponent(query)}&api_key=${process.env.SERP_API_KEY}`;
+
+  try {
+    const res = await fetch(url);
+    const data = await res.json();
+
+    if (!data.organic_results) return [];
+
+    return data.organic_results;
+  
+  } catch (err) {
+    console.error("SerpAPI error:", err);
+    return [];
+  }
+}
+
+
+/*************************************************
+ 🔵 FILTER BANK APPLY LINKS
+*************************************************/
+function extractApplyLinks(bank, serpResults) {
+
+  if (!serpResults || !serpResults.length) return [];
+
+  const bankDomain = bank
+    .toLowerCase()
+    .replace("bank", "")
+    .replace("finance", "")
+    .replace("limited", "")
+    .replace("ltd", "")
+    .trim()
+    .split(" ")[0]; // use first name (kotak / hdfc / icici etc)
+
+  const APPLY_KEYWORDS = [
+    "apply",
+    "onboarding",
+    "instant",
+    "insta",
+    "pl",
+    "preapproved",
+    "pre-approved",
+    "loan",
+    "personal-loan",
+    "apply-now",
+    "instant-loan",
+    "digital"
+  ];
+
+  const results = serpResults
+    .filter(r => r.link)
+    .filter(r => 
+      r.link.toLowerCase().includes(bankDomain) &&
+      APPLY_KEYWORDS.some(k => r.link.toLowerCase().includes(k))
+    )
+    .map(r => ({
+      title: r.title,
+      url: r.link
+    }));
+
+  return results.slice(0, 5); // max 5 links
+}
+
+
+/*************************************************
+ 🔵 BACKEND ROUTE: /api/live-offers
+*************************************************/
+app.get("/api/live-offers", async (req, res) => {
+  const bank = req.query.bank;
+
+  if (!bank) {
+    return res.json({ success: false, offers: [], message: "Bank missing" });
+  }
+
+  try {
+    // 1. Fetch Google results via SerpAPI
+    const serpResults = await serpSearch(bank);
+
+    // 2. Extract apply links
+    const offers = extractApplyLinks(bank, serpResults);
+
+    return res.json({
+      success: true,
+      bank,
+      offers
+    });
+
+  } catch (err) {
+    console.error("Live offer error:", err);
+    return res.json({
+      success: false,
+      bank,
+      offers: []
+    });
+  }
+});
+
 // =====================================================
 // MAIN ENDPOINT: /analyze
 // =====================================================
