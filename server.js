@@ -478,45 +478,92 @@ async function serpSearch(bank) {
  🔵 FILTER BANK APPLY LINKS (Smart Matching)
 *************************************************/
 function extractApplyLinks(bank, serpResults) {
-
   if (!serpResults || !serpResults.length) return [];
 
-  // Extract domain keyword (kotak, hdfc, icici, axis)
-  const bankKeyword = bank
+  const bankKey = bank
     .toLowerCase()
     .replace("bank", "")
     .replace("finance", "")
+    .replace("mahindra", "")
     .replace("limited", "")
     .replace("ltd", "")
     .trim()
-    .split(" ")[0]; 
+    .split(" ")[0];
 
-  const APPLY_KEYWORDS = [
+  const officialDomains = [
+    "hdfc",
+    "kotak",
+    "icici",
+    "axis",
+    "sbi",
+    "idfc",
+    "indusind",
+    "rbl",
+    "bajaj",
+    "yesbank",
+    "federal",
+    "aubank"
+  ];
+
+  const badDomains = [
+    "paisabazaar",
+    "bankbazaar",
+    "policybazaar",
+    "moneycontrol",
+    "hindustantimes",
+    "news",
+    "blog"
+  ];
+
+  const goodKeywords = [
     "apply",
     "onboarding",
     "instant",
-    "insta",
+    "digital",
     "preapproved",
     "pre-approved",
     "personal-loan",
-    "pl",
     "loan",
-    "digital",
-    "apply-now"
+    "pl"
   ];
 
-  const matches = serpResults
-    .filter(r => r.link)
-    .filter(r =>
-      r.link.toLowerCase().includes(bankKeyword) &&
-      APPLY_KEYWORDS.some(k => r.link.toLowerCase().includes(k))
-    )
-    .map(r => ({
-      title: r.title,
-      url: r.link
-    }));
+  const titleBoostKeywords = [
+    "instant",
+    "pre approved",
+    "pre-approved",
+    "personal loan",
+    "apply now",
+    "digital",
+    "instant pl"
+  ];
 
-  return matches.slice(0, 3);
+  function scoreResult(r) {
+    let url = r.link.toLowerCase();
+    let title = (r.title || "").toLowerCase();
+    let score = 0;
+
+    if (!url.includes(bankKey)) return -9999;
+    if (badDomains.some(b => url.includes(b))) return -5000;
+    if (officialDomains.some(d => url.includes(d))) score += 40;
+
+    goodKeywords.forEach(k => { if (url.includes(k)) score += 8; });
+    titleBoostKeywords.forEach(t => { if (title.includes(t)) score += 10; });
+
+    if (url.includes("onboarding")) score += 50;
+    if (url.length < 80) score += 5;
+    if (url.length > 150) score -= 10;
+    if (!url.startsWith("https")) score -= 20;
+
+    return score;
+  }
+
+  return serpResults
+    .filter(r => r.link)
+    .map(r => ({ ...r, _score: scoreResult(r) }))
+    .filter(r => r._score > 0)
+    .sort((a, b) => b._score - a._score)
+    .slice(0, 3)
+    .map(r => ({ title: r.title, url: r.link }));
 }
 
 /*************************************************
