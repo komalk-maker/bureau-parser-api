@@ -1,7 +1,7 @@
 {
   "name": "bureau-parser-api",
-  "version": "1.1.0",
-  "description": "AI-powered Bureau Report Parser + Live Lender Offers",
+  "version": "1.0.0",
+  "description": "AI-powered Bureau Report Parser for KalkiFinserv",
   "main": "server.js",
   "type": "module",
   "scripts": {
@@ -13,7 +13,6 @@
     "multer": "1.4.5-lts.1",
     "openai": "^4.67.0",
     "pdf-parse": "^1.1.1",
-    "form-data": "^4.0.0",
-    "google-search-results-nodejs": "^2.0.0"
+    "form-data": "^4.0.0"
   }
 }
