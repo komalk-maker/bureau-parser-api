@@ -6,40 +6,36 @@
    =========================================================== */
 
 /* ===========================================================
-   IMPORTS (FIXED)
+   IMPORTS (CLEAN + Render Safe)
    =========================================================== */
 import express from "express";
 import multer from "multer";
 import cors from "cors";
 import fs from "fs";
 import OpenAI from "openai";
-import pdf from "pdf-parse";               // only once!
-import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.js";
-import pdfjsWorker from "pdfjs-dist/legacy/build/pdf.worker.js";
+import pdf from "pdf-parse"; // ✔ Use ONLY this for bank statements
 
-// Configure PDF.js worker
-pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorker;
+// NO pdfjs-dist required unless you extract page layout manually
+// REMOVE all pdfjsLib and worker imports
+
 import path from "path";
 import { fileURLToPath } from "url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-pdfjsLib.GlobalWorkerOptions.workerSrc = path.join(
-  __dirname,
-  "node_modules/pdfjs-dist/legacy/build/pdf.worker.js"
-);
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// File upload directory
+// File upload handler
 const upload = multer({ dest: "uploads/" });
 
 // OpenAI client
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
-// Vector store for Govt scheme PDFs
+
+// optional future use
 const GOVT_VECTOR_ID = process.env.GOVT_SCHEMES_VECTOR_STORE_ID;
 
 // Helper to pull plain text out of Responses API output
