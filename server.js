@@ -5,7 +5,7 @@
    totalWriteOffAmount, principalWriteOff, settlementAmount per loan.
    =========================================================== */
 
-import pdfExtract from "pdf.js-extract";
+import pdf from "pdf-parse";
 import express from "express";
 import multer from "multer";
 import pdf from "pdf-parse";
