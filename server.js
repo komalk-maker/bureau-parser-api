@@ -5,13 +5,17 @@
    totalWriteOffAmount, principalWriteOff, settlementAmount per loan.
    =========================================================== */
 
-import pdf from "pdf-parse";
+/* ===========================================================
+   IMPORTS (FIXED)
+   =========================================================== */
 import express from "express";
 import multer from "multer";
-import pdf from "pdf-parse";
 import cors from "cors";
 import fs from "fs";
 import OpenAI from "openai";
+import pdf from "pdf-parse";               // only once!
+import pdfjsLib from "pdfjs-dist/legacy/build/pdf"; // for bank extractor
+
 
 const app = express();
 app.use(cors());
@@ -556,13 +560,29 @@ app.post("/analyze-bank", upload.single("pdf"), async (req, res) => {
     // --------------------------
     // 1️⃣ Extract PDF → TEXT
     // --------------------------
-    const extracted = await pdfExtract.extract(req.file.path, {});
-    let fullText = "";
+    /* ===========================================================
+   PDF.js Extractor for Bank Statements
+   =========================================================== */
+const pdfExtract = {
+  extract: async (filePath) => {
+    const loadingTask = pdfjsLib.getDocument(filePath);
+    const pdfDoc = await loadingTask.promise;
 
-    extracted.pages.forEach(p => {
-      p.content.forEach(t => (fullText += t.str + " "));
-      fullText += "\n";
-    });
+    let pages = [];
+
+    for (let i = 1; i <= pdfDoc.numPages; i++) {
+      const page = await pdfDoc.getPage(i);
+      const textContent = await page.getTextContent();
+
+      pages.push({
+        page: i,
+        content: textContent.items.map(it => ({ str: it.str }))
+      });
+    }
+
+    return { pages };
+  }
+};
 
     console.log("📘 Extracted PDF text length:", fullText.length);
 
