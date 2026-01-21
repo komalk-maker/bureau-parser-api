@@ -565,15 +565,22 @@ app.post("/analyze-bank", upload.single("pdf"), async (req, res) => {
     console.log("📄 Bank PDF Uploaded:", req.file.originalname);
 
     // --------------------------
-    // 1️⃣ Extract PDF → TEXT (PDF.js)
-    // --------------------------
-    const extracted = await pdfExtract.extract(req.file.path);
+// 1️⃣ Extract PDF → TEXT
+// --------------------------
+const dataBuffer = fs.readFileSync(req.file.path);
+const pdfData = await pdf(dataBuffer);
+const fullText = pdfData.text || "";
 
-    // Convert PDF.js structured output → plain text
-    let fullText = "";
-    extracted.pages.forEach(p => {
-      fullText += p.content.map(c => c.str).join(" ") + "\n";
-    });
+console.log("📘 Extracted PDF text length:", fullText.length);
+
+if (!fullText || fullText.trim().length < 50) {
+  return res.json({
+    success: false,
+    message: "Unable to read bank statement text"
+  });
+}
+
+
 
     console.log("📘 Extracted PDF text length:", fullText.length);
 
