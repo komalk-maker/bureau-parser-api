@@ -449,6 +449,108 @@ ${extractedText}
 
   return parsed;
 }
+// ================================================
+// 📌 BANK STATEMENT ANALYZER API
+// ================================================
+import multer from "multer";
+import { PDFExtract } from "pdf.js-extract";
+import OpenAI from "openai";
+
+const upload = multer({ dest: "uploads/" });
+const pdfExtract = new PDFExtract();
+const openai = new OpenAI({ apiKey: process.env.OPENAI_KEY });
+
+// -----------------------------------------
+// 🔥 ROUTE: POST /analyze-bank
+// -----------------------------------------
+app.post("/analyze-bank", upload.single("pdf"), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: "No PDF uploaded" });
+    }
+
+    console.log("📄 Bank PDF Uploaded:", req.file.originalname);
+
+    // --------------------------
+    // 1️⃣ Extract PDF → TEXT
+    // --------------------------
+    const extracted = await pdfExtract.extract(req.file.path, {});
+    let fullText = "";
+
+    extracted.pages.forEach(p => {
+      p.content.forEach(t => (fullText += t.str + " "));
+      fullText += "\n";
+    });
+
+    console.log("📘 Extracted PDF text length:", fullText.length);
+
+    // --------------------------
+    // 2️⃣ Send to GPT for Analysis
+    // --------------------------
+    const prompt = `
+You are an expert bank statement analyzer.  
+Extract the following only from this bank statement text:
+
+Required JSON keys:
+{
+  "totalCredits": number,
+  "emiBounceCount": number,
+  "latestMonthEMIs": [
+    { "lender": string, "amount": number, "emiDate": string }
+  ],
+  "avgBalance12M": number,
+  "cashflow": [
+    { "month": "Jan-2024", "credits": number, "debits": number }
+  ],
+  "salaryDetection": {
+    "isSalaried": boolean,
+    "salaryBank": string | null
+  },
+  "odUsage": {
+    "used": boolean,
+    "maxOverdraft": number
+  }
+}
+
+Rules:
+- If data is missing: use null or sensible zeros.
+- Do NOT hallucinate lender names — infer from EMI descriptors.
+- Only output JSON.
+- Bank statement text is below:
+
+-------------------------------
+${fullText}
+-------------------------------
+`;
+
+    const ai = await openai.chat.completions.create({
+      model: "gpt-4.1-mini",
+      messages: [{ role: "user", content: prompt }],
+      temperature: 0
+    });
+
+    let json;
+    try {
+      json = JSON.parse(ai.choices[0].message.content);
+    } catch (e) {
+      return res.status(500).json({ error: "LLM returned non-JSON output" });
+    }
+
+    console.log("✅ Parsed Bank Summary:", json);
+
+    // --------------------------
+    // 3️⃣ Return JSON summary
+    // --------------------------
+    res.json({
+      success: true,
+      data: json
+    });
+
+  } catch (err) {
+    console.error("❌ Error analyzing bank:", err);
+    res.status(500).json({ error: "Server error analyzing bank statement" });
+  }
+});
 
 // =====================================================
 // MAIN ENDPOINT: /analyze
