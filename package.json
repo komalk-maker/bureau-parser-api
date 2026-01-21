@@ -1,7 +1,7 @@
 {
   "name": "bureau-parser-api",
   "version": "1.0.0",
-  "description": "AI-powered Bureau Report Parser for KalkiFinserv",
+  "description": "AI-powered Bureau & Bank Statement Parser for KalkiFinserv",
   "main": "server.js",
   "type": "module",
   "scripts": {
@@ -11,9 +11,17 @@
     "cors": "^2.8.5",
     "express": "^4.18.2",
     "multer": "1.4.5-lts.1",
+
+    /* --- MOST IMPORTANT FIX --- */
     "openai": "^4.67.0",
+
+    /* --- PDF processing (bank + bureau) --- */
     "pdf-parse": "^1.1.1",
+
+    /* Keep ONLY if you actually use pdfjs-dist. Your current code does NOT. */
     "pdfjs-dist": "^3.4.120",
+
+    /* Required for vector-store PDF uploads */
     "form-data": "^4.0.0"
   }
 }
