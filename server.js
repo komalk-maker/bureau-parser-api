@@ -14,8 +14,19 @@ import cors from "cors";
 import fs from "fs";
 import OpenAI from "openai";
 import pdf from "pdf-parse";               // only once!
-import pdfjsLib from "pdfjs-dist/legacy/build/pdf"; // for bank extractor
+import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.js";
+import pdfjsWorker from "pdfjs-dist/legacy/build/pdf.worker.js";
 
+// Configure PDF.js worker
+pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorker;
+import path from "path";
+import { fileURLToPath } from "url";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+pdfjsLib.GlobalWorkerOptions.workerSrc = path.join(
+  __dirname,
+  "node_modules/pdfjs-dist/legacy/build/pdf.worker.js"
+);
 
 const app = express();
 app.use(cors());
