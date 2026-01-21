@@ -8,6 +8,8 @@
 /* ===========================================================
    IMPORTS (CLEAN + Render Safe)
    =========================================================== */
+import pkg from "openai/package.json";
+console.log("OPENAI VERSION LOADED:", pkg.version);
 import express from "express";
 import multer from "multer";
 import cors from "cors";
