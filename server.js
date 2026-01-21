@@ -452,17 +452,6 @@ ${extractedText}
 // ================================================
 // 📌 BANK STATEMENT ANALYZER API
 // ================================================
-import multer from "multer";
-import { PDFExtract } from "pdf.js-extract";
-import OpenAI from "openai";
-
-const upload = multer({ dest: "uploads/" });
-const pdfExtract = new PDFExtract();
-const openai = new OpenAI({ apiKey: process.env.OPENAI_KEY });
-
-// -----------------------------------------
-// 🔥 ROUTE: POST /analyze-bank
-// -----------------------------------------
 app.post("/analyze-bank", upload.single("pdf"), async (req, res) => {
   try {
     if (!req.file) {
