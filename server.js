@@ -547,7 +547,7 @@ app.post("/analyze", upload.single("pdf"), async (req, res) => {
   }
 });
 // ================================================
-// 📌 BANK STATEMENT ANALYZER API
+// 📌 BANK STATEMENT ANALYZER API (FIXED)
 // ================================================
 app.post("/analyze-bank", upload.single("pdf"), async (req, res) => {
   try {
@@ -558,42 +558,32 @@ app.post("/analyze-bank", upload.single("pdf"), async (req, res) => {
     console.log("📄 Bank PDF Uploaded:", req.file.originalname);
 
     // --------------------------
-    // 1️⃣ Extract PDF → TEXT
+    // 1️⃣ Extract PDF → TEXT (PDF.js)
     // --------------------------
-    /* ===========================================================
-   PDF.js Extractor for Bank Statements
-   =========================================================== */
-const pdfExtract = {
-  extract: async (filePath) => {
-    const loadingTask = pdfjsLib.getDocument(filePath);
-    const pdfDoc = await loadingTask.promise;
+    const extracted = await pdfExtract.extract(req.file.path);
 
-    let pages = [];
-
-    for (let i = 1; i <= pdfDoc.numPages; i++) {
-      const page = await pdfDoc.getPage(i);
-      const textContent = await page.getTextContent();
-
-      pages.push({
-        page: i,
-        content: textContent.items.map(it => ({ str: it.str }))
-      });
-    }
-
-    return { pages };
-  }
-};
+    // Convert PDF.js structured output → plain text
+    let fullText = "";
+    extracted.pages.forEach(p => {
+      fullText += p.content.map(c => c.str).join(" ") + "\n";
+    });
 
     console.log("📘 Extracted PDF text length:", fullText.length);
 
+    if (!fullText || fullText.trim().length < 50) {
+      return res.json({
+        success: false,
+        message: "Unable to read bank statement text"
+      });
+    }
+
     // --------------------------
-    // 2️⃣ Send to GPT for Analysis
+    // 2️⃣ GPT — Analysis
     // --------------------------
     const prompt = `
 You are an expert bank statement analyzer.  
 Extract the following only from this bank statement text:
 
-Required JSON keys:
 {
   "totalCredits": number,
   "emiBounceCount": number,
@@ -614,15 +604,8 @@ Required JSON keys:
   }
 }
 
-Rules:
-- If data is missing: use null or sensible zeros.
-- Do NOT hallucinate lender names — infer from EMI descriptors.
-- Only output JSON.
-- Bank statement text is below:
-
--------------------------------
+TEXT:
 ${fullText}
--------------------------------
 `;
 
     const ai = await openai.chat.completions.create({
@@ -641,7 +624,7 @@ ${fullText}
     console.log("✅ Parsed Bank Summary:", json);
 
     // --------------------------
-    // 3️⃣ Return JSON summary
+    // 3️⃣ Return Final JSON
     // --------------------------
     res.json({
       success: true,
@@ -651,47 +634,6 @@ ${fullText}
   } catch (err) {
     console.error("❌ Error analyzing bank:", err);
     res.status(500).json({ error: "Server error analyzing bank statement" });
-  }
-});
-app.post("/chat-bank", async (req, res) => {
-  try {
-    const { question, analysis } = req.body;
-
-    if (!question || !analysis) {
-      return res.json({
-        success: false,
-        message: "Missing question or analysis object"
-      });
-    }
-
-    const prompt = `
-You are a Bank Statement Expert.
-
-User question:
-${question}
-
-ANALYSIS_JSON:
-${JSON.stringify(analysis, null, 2)}
-
-Answer simply, use facts from analysis only.
-Do not add numbers that are not in the JSON.
-`;
-
-    const response = await openai.responses.create({
-      model: "gpt-4.1-mini",
-      input: prompt
-    });
-
-    const answer =
-      response.output?.[0]?.content?.[0]?.text || "Couldn't generate answer";
-
-    res.json({ success: true, answer });
-  } catch (err) {
-    console.error("Chat-bank error:", err);
-    res.json({
-      success: false,
-      message: "Error answering bank chat"
-    });
   }
 });
 
