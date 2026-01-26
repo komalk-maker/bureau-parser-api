@@ -657,18 +657,16 @@ app.post("/analyze-bank", upload.single("pdf"), async (req, res) => {
 
     console.log("📄 Bank PDF Uploaded:", req.file.originalname);
 
-    // Extract PDF text
-    const extracted = await pdfExtract.extract(req.file.path);
-    let fullText = "";
-    extracted.pages.forEach(p => {
-      fullText += p.content.map(c => c.str).join(" ") + "\n";
-    });
+    // 1️⃣ Correct PDF extraction (pdf-parse)
+    const buffer = fs.readFileSync(req.file.path);
+    const pdfData = await pdf(buffer);
+    const fullText = pdfData.text;
 
     if (!fullText || fullText.trim().length < 50) {
       return res.json({ success: false, message: "Unable to read PDF text" });
     }
 
-    // GPT: Transaction parsing
+    // 2️⃣ GPT transaction parsing
     const prompt = bankGPTPrompt(fullText);
 
     const ai = await openai.chat.completions.create({
@@ -684,7 +682,7 @@ app.post("/analyze-bank", upload.single("pdf"), async (req, res) => {
       return res.status(500).json({ success: false, error: "GPT returned invalid JSON" });
     }
 
-    // Generate Perfios-style summary
+    // 3️⃣ Summary
     const summary = generateBankSummary(transactions);
 
     return res.json({
