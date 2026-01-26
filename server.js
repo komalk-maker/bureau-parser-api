@@ -553,74 +553,123 @@ app.post("/analyze", upload.single("pdf"), async (req, res) => {
     }
   }
 });
-// ================================================
-// 📌 BANK STATEMENT ANALYZER API (FIXED)
-// ================================================
-app.post("/analyze-bank", upload.single("pdf"), async (req, res) => {
-  try {
-    if (!req.file) {
-      return res.status(400).json({ error: "No PDF uploaded" });
-    }
+// ===============================================
+// GPT Prompt for Full Transaction Extraction
+// ===============================================
+function bankGPTPrompt(fullText) {
+  return `
+You are an expert bank statement transaction parser.
 
-    console.log("📄 Bank PDF Uploaded:", req.file.originalname);
+Extract ALL transactions from the given bank statement text.
+Return STRICT JSON ARRAY ONLY.
 
-    // --------------------------
-// 1️⃣ Extract PDF → TEXT
-// --------------------------
-const dataBuffer = fs.readFileSync(req.file.path);
-const pdfData = await pdf(dataBuffer);
-const fullText = pdfData.text || "";
-
-console.log("📘 Extracted PDF text length:", fullText.length);
-
-if (!fullText || fullText.trim().length < 50) {
-  return res.json({
-    success: false,
-    message: "Unable to read bank statement text"
-  });
-}
-
-
-
-    console.log("📘 Extracted PDF text length:", fullText.length);
-
-    if (!fullText || fullText.trim().length < 50) {
-      return res.json({
-        success: false,
-        message: "Unable to read bank statement text"
-      });
-    }
-
-    // --------------------------
-    // 2️⃣ GPT — Analysis
-    // --------------------------
-    const prompt = `
-You are an expert bank statement analyzer.  
-Extract the following only from this bank statement text:
+Each item MUST follow:
 
 {
-  "totalCredits": number,
-  "emiBounceCount": number,
-  "latestMonthEMIs": [
-    { "lender": string, "amount": number, "emiDate": string }
-  ],
-  "avgBalance12M": number,
-  "cashflow": [
-    { "month": "Jan-2024", "credits": number, "debits": number }
-  ],
-  "salaryDetection": {
-    "isSalaried": boolean,
-    "salaryBank": string | null
-  },
-  "odUsage": {
-    "used": boolean,
-    "maxOverdraft": number
-  }
+  "date": "YYYY-MM-DD",
+  "valueDate": "YYYY-MM-DD | null",
+  "narration": "string",
+  "refNo": "string | null",
+  "withdrawal": number,
+  "deposit": number,
+  "balance": number,
+  "mode": "UPI | NEFT | IMPS | TPT | ACH | ATM | CHQ | OTHER",
+  "category": "Salary | EMI | Rent | Fuel | Charges | Cash Deposit | Cash Withdrawal | Transfer | Purchase | Other",
+  "subcategory": "string | null",
+  "lenderOrEmployer": "string | null",
+  "month": "MMM-YYYY"
 }
+
+RULES:
+- Merge multiline narrations.
+- Identify mode automatically.
+- Salary: SALARY, PAYROLL, HR, SAL.
+- EMI: ACH D, EMI, LOAN EMI, ECS.
+- Cash deposit: CASH DEP, CDM.
+- Cash withdrawal: ATM, CASH WDL.
+- Extract lender/employer when possible.
+- Month = derived from date.
+
+Return ONLY a JSON array.
 
 TEXT:
 ${fullText}
 `;
+}
+// ===============================================
+// Monthly Summary (Perfios Style)
+// ===============================================
+function generateBankSummary(txns) {
+  const months = {};
+
+  txns.forEach(t => {
+    if (!months[t.month]) {
+      months[t.month] = {
+        creditCount: 0,
+        debitCount: 0,
+        creditAmount: 0,
+        debitAmount: 0,
+        highestCredit: 0,
+        highestDebit: 0,
+        lowestBalance: Infinity,
+        highestBalance: -Infinity,
+        salaryCount: 0,
+        emiCount: 0,
+        cashDepositCount: 0,
+        cashWithdrawalCount: 0
+      };
+    }
+
+    const m = months[t.month];
+
+    if (t.deposit > 0) {
+      m.creditCount++;
+      m.creditAmount += t.deposit;
+      m.highestCredit = Math.max(m.highestCredit, t.deposit);
+    }
+
+    if (t.withdrawal > 0) {
+      m.debitCount++;
+      m.debitAmount += t.withdrawal;
+      m.highestDebit = Math.max(m.highestDebit, t.withdrawal);
+    }
+
+    m.lowestBalance = Math.min(m.lowestBalance, t.balance);
+    m.highestBalance = Math.max(m.highestBalance, t.balance);
+
+    if (t.category === "Salary") m.salaryCount++;
+    if (t.category === "EMI") m.emiCount++;
+    if (t.category === "Cash Deposit") m.cashDepositCount++;
+    if (t.category === "Cash Withdrawal") m.cashWithdrawalCount++;
+  });
+
+  return months;
+}
+
+// ===============================================
+// 📌 FULL BANK STATEMENT ANALYZER (Transactions + Summary)
+// ===============================================
+app.post("/analyze-bank", upload.single("pdf"), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ success: false, error: "No PDF uploaded" });
+    }
+
+    console.log("📄 Bank PDF Uploaded:", req.file.originalname);
+
+    // Extract PDF text
+    const extracted = await pdfExtract.extract(req.file.path);
+    let fullText = "";
+    extracted.pages.forEach(p => {
+      fullText += p.content.map(c => c.str).join(" ") + "\n";
+    });
+
+    if (!fullText || fullText.trim().length < 50) {
+      return res.json({ success: false, message: "Unable to read PDF text" });
+    }
+
+    // GPT: Transaction parsing
+    const prompt = bankGPTPrompt(fullText);
 
     const ai = await openai.chat.completions.create({
       model: "gpt-4.1-mini",
@@ -628,26 +677,116 @@ ${fullText}
       temperature: 0
     });
 
-    let json;
+    let transactions;
     try {
-      json = JSON.parse(ai.choices[0].message.content);
+      transactions = JSON.parse(ai.choices[0].message.content);
     } catch (e) {
-      return res.status(500).json({ error: "LLM returned non-JSON output" });
+      return res.status(500).json({ success: false, error: "GPT returned invalid JSON" });
     }
 
-    console.log("✅ Parsed Bank Summary:", json);
+    // Generate Perfios-style summary
+    const summary = generateBankSummary(transactions);
 
-    // --------------------------
-    // 3️⃣ Return Final JSON
-    // --------------------------
-    res.json({
+    return res.json({
       success: true,
-      data: json
+      summary,
+      transactions
     });
 
   } catch (err) {
     console.error("❌ Error analyzing bank:", err);
-    res.status(500).json({ error: "Server error analyzing bank statement" });
+    return res.status(500).json({ success: false, error: "Server error" });
+  }
+});
+// ===============================================
+// 📌 EXPORT BANK EXCEL (Summary + Transactions)
+// ===============================================
+app.post("/export-excel", async (req, res) => {
+  try {
+    const { summary, transactions } = req.body;
+
+    if (!summary || !transactions) {
+      return res.status(400).json({ error: "Missing summary or transactions" });
+    }
+
+    const workbook = new ExcelJS.Workbook();
+
+    // -------- Sheet 1: Summary --------
+    const sheet1 = workbook.addWorksheet("Summary");
+    const months = Object.keys(summary);
+
+    sheet1.addRow(["Monthwise Details", ...months, "TOTAL", "AVERAGE"]);
+
+    const rows = [
+      { key: "creditCount", label: "Total No. of Credit Transactions" },
+      { key: "debitCount", label: "Total No. of Debit Transactions" },
+      { key: "creditAmount", label: "Total Credit Amount" },
+      { key: "debitAmount", label: "Total Debit Amount" },
+      { key: "highestCredit", label: "Highest Credit Amount" },
+      { key: "highestDebit", label: "Highest Debit Amount" },
+      { key: "lowestBalance", label: "Lowest Balance" },
+      { key: "highestBalance", label: "Highest Balance" },
+      { key: "salaryCount", label: "Salary Count" },
+      { key: "emiCount", label: "EMI Count" },
+      { key: "cashDepositCount", label: "Cash Deposit Count" },
+      { key: "cashWithdrawalCount", label: "Cash Withdrawal Count" }
+    ];
+
+    rows.forEach(r => {
+      const row = [r.label];
+
+      months.forEach(m => row.push(summary[m][r.key] || 0));
+
+      const total = months.reduce((a, m) => a + (summary[m][r.key] || 0), 0);
+      row.push(total);
+      row.push(total / months.length);
+
+      sheet1.addRow(row);
+    });
+
+    sheet1.columns.forEach(col => col.width = 18);
+
+    // -------- Sheet 2: Transactions --------
+    const sheet2 = workbook.addWorksheet("Transactions");
+    sheet2.addRow([
+      "Date","Value Date","Narration","Ref No",
+      "Withdrawal","Deposit","Balance",
+      "Mode","Category","Subcategory",
+      "Lender/Employer","Month"
+    ]);
+
+    transactions.forEach(t => {
+      sheet2.addRow([
+        t.date,
+        t.valueDate,
+        t.narration,
+        t.refNo,
+        t.withdrawal,
+        t.deposit,
+        t.balance,
+        t.mode,
+        t.category,
+        t.subcategory,
+        t.lenderOrEmployer,
+        t.month
+      ]);
+    });
+
+    sheet2.columns.forEach(col => col.width = 20);
+
+    // Return file
+    res.setHeader(
+      "Content-Type",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    );
+    res.setHeader("Content-Disposition", "attachment; filename=Bank_Analysis.xlsx");
+
+    await workbook.xlsx.write(res);
+    res.end();
+
+  } catch (err) {
+    console.error("❌ Excel Export Error:", err);
+    res.status(500).json({ error: "Failed to generate Excel" });
   }
 });
 
