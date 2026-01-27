@@ -234,7 +234,7 @@ ${extractedText}
 `;
 
   const response = await openai.responses.create({
-    model: "gpt-4.1-mini",
+    model: "gpt-4.1",
     input: prompt,
     text: {
       format: {
@@ -907,7 +907,7 @@ FORMAT:
 `;
 
     const response = await openai.responses.create({
-      model: "gpt-4.1-mini",
+      model: "gpt-4.1",
       input: [
         { role: "system", content: systemPrompt },
         ...messages,
