@@ -653,11 +653,11 @@ ${fullText}
 
 
 // =====================================================
-// CHAT ENDPOINT: /chat  (Existing bureau Q&A assistant)
+// CHAT ENDPOINT: /chat  (Enhanced — includes logic dump)
 // =====================================================
 app.post("/chat", async (req, res) => {
   try {
-    const { question, analysis, extras } = req.body || {};
+    const { question, analysis, extras, logic } = req.body || {};
 
     if (!question || typeof question !== "string") {
       return res.json({
@@ -666,28 +666,32 @@ app.post("/chat", async (req, res) => {
       });
     }
 
-    const safeAnalysis =
-      typeof analysis === "object" && analysis ? analysis : {};
+    // Safe guards
+    const safeAnalysis = (analysis && typeof analysis === "object") ? analysis : {};
+    const safeExtras = (extras && typeof extras === "object") ? extras : {};
+    const safeLogic = (logic && typeof logic === "object") ? logic : {};
 
-    const safeExtras =
-      typeof extras === "object" && extras ? extras : {};
-
+    // SYSTEM INSTRUCTIONS
     const systemMessage = `
-You are "Kalki AI", an assistant for KalkiFinserv's Bureau Analyzer.
+You are "Kalki AI", an intelligent loan & bank statement assistant for KalkiFinserv.
 
-You receive:
-- A natural language QUESTION from the borrower.
-- ANALYSIS_JSON: machine-readable bureau data (score, loans, enquiries, totals).
-- EXTRAS_JSON: optional pre-computed insights from the frontend.
+CONTEXT YOU RECEIVE:
+1. USER QUESTION (text)
+2. ANALYSIS_JSON → structured bureau data (score, loans, DPDS, EMIs, enquiries)
+3. EXTRAS_JSON → precomputed insights (ROI comparison, foreclosure tips, risk markers)
+4. LOGIC_JSON → full rules, formulas, functions, masters (bank lists, loan features, analyzers)
 
-Guidelines:
-- Always use the numbers from ANALYSIS_JSON / EXTRAS_JSON when talking about EMIs, totals, FOIR, DSCR or closure suggestions.
-- If EXTRAS_JSON already contains specific calculations (e.g. months to reduce outstanding, recommended loans to close), TRUST those numbers and just explain them clearly.
-- If something is missing, you may answer qualitatively (rules of thumb, next steps), but DO NOT invent precise rupee amounts or exact EMI breakdowns.
-- Keep answers short, practical, and in plain English. Use bullet points when helpful.
-- Don't mention JSON, prompts, or that you are an AI model. Speak as a simple loan advisor.
+INSTRUCTIONS:
+- Always use ANALYSIS_JSON, EXTRAS_JSON, and LOGIC_JSON to answer.
+- Follow the EXACT formulas and rules given in LOGIC_JSON.
+- Do NOT invent numbers. Only use numbers provided in ANALYSIS_JSON or EXTRAS_JSON.
+- If LOGIC_JSON contains a formula or rule, follow it strictly.
+- If masters include icons, interest ranges, features, etc., use those EXACT values.
+- Keep responses simple, clear, and friendly — like a human financial advisor.
+- DO NOT mention prompts, JSON, or internal processing.
 `;
 
+    // USER MESSAGE WITH ALL DATA INJECTED
     const userMessage = `
 QUESTION:
 ${question}
@@ -697,19 +701,23 @@ ${JSON.stringify(safeAnalysis, null, 2)}
 
 EXTRAS_JSON:
 ${JSON.stringify(safeExtras, null, 2)}
+
+LOGIC_JSON:
+${JSON.stringify(safeLogic, null, 2)}
 `;
 
+    // OPENAI CALL
     const response = await openai.responses.create({
       model: "gpt-4.1-mini",
       input: [
         { role: "system", content: systemMessage },
-        { role: "user", content: userMessage },
-      ],
+        { role: "user", content: userMessage }
+      ]
     });
 
     const answer =
-      response.output?.[0]?.content?.[0]?.text ||
-      "Sorry, I was not able to prepare a proper reply.";
+      response?.output?.[0]?.content?.[0]?.text ||
+      "Sorry, I couldn’t generate a meaningful reply.";
 
     res.json({ success: true, answer });
   } catch (err) {
