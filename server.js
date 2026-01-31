@@ -785,6 +785,22 @@ RULES:
     });
   }
 });
+app.get("/govt-vector-test", async (req, res) => {
+  const r = await openai.responses.create({
+    model: "gpt-4.1-mini",
+    input: "List all government schemes mentioned in the documents.",
+    tools: [
+      {
+        type: "file_search",
+        vector_store_ids: [process.env.GOVT_VECTOR_ID]
+      }
+    ],
+    max_output_tokens: 300
+  });
+
+  res.json({ answer: extractResponseText(r) });
+});
+
 // ---------- Test Route ----------
 app.get("/", (req, res) =>
   res.send("Kalki Finserv Bureau Parser API is LIVE 🚀")
