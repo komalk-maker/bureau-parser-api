@@ -735,7 +735,7 @@ ${JSON.stringify(safeLogic, null, 2)}
 // =====================================================
 app.post("/govt-schemes-chat", async (req, res) => {
   try {
-    const { messages, context } = req.body;
+    const { messages = [] } = req.body || {};
 
     const lastUserMsg =
       [...messages].reverse().find(m => m.role === "user")?.content || "";
@@ -745,12 +745,12 @@ app.post("/govt-schemes-chat", async (req, res) => {
     // -----------------------------
     const intentPrompt = `
 Classify the user's intent into ONE category:
-- "DISCOVERY" (asking which scheme applies)
-- "SCHEME_DETAIL" (asking about a named scheme)
-- "DOCUMENTS"
-- "ELIGIBILITY"
-- "PROCESS"
-- "OUT_OF_SCOPE"
+- DISCOVERY
+- SCHEME_DETAIL
+- DOCUMENTS
+- ELIGIBILITY
+- PROCESS
+- OUT_OF_SCOPE
 
 User query:
 "${lastUserMsg}"
@@ -761,8 +761,8 @@ Respond ONLY with the intent word.
     const intentRes = await openai.responses.create({
       model: "gpt-4.1-mini",
       input: intentPrompt,
-      max_output_tokens: 20,
-      temperature: 0
+      temperature: 0,
+      max_output_tokens: 20
     });
 
     const intent =
@@ -775,11 +775,12 @@ Respond ONLY with the intent word.
 
     if (intent === "DISCOVERY") {
       searchQuery = `
-Find government loan or subsidy schemes applicable based on:
-- borrower type
+Identify applicable government loan or subsidy schemes based on:
+- borrower category
 - loan purpose
-- eligibility
-Mention only schemes present in the documents.
+- eligibility conditions
+
+List ONLY schemes explicitly mentioned in the documents.
 `;
     }
 
@@ -790,27 +791,30 @@ Mention only schemes present in the documents.
 You are Kalki Govt Scheme Assistant.
 
 STRICT RULES:
-- Answer ONLY using retrieved document text.
-- If documents do not clearly answer, say:
+- Use ONLY information retrieved from the scheme documents.
+- If information is missing or unclear, say:
   "I don't see this clearly mentioned in the scheme documents."
-- Do NOT guess or use outside knowledge.
-- Quote numbers exactly as written.
+- Do NOT use outside knowledge.
+- Copy numbers and limits exactly as written.
 
 Answer intent: ${intent}
 `;
 
     const response = await openai.responses.create({
       model: "gpt-4.1-mini",
+
       input: [
         { role: "system", content: systemPrompt },
         { role: "user", content: searchQuery }
       ],
-      tools: [{ type: "file_search" }],
-      tool_config: {
-        file_search: {
+
+      tools: [
+        {
+          type: "file_search",
           vector_store_ids: [GOVT_VECTOR_ID]
         }
-      },
+      ],
+
       temperature: 0.1,
       max_output_tokens: 900
     });
@@ -822,14 +826,13 @@ Answer intent: ${intent}
     return res.json({ success: true, answer });
 
   } catch (err) {
-    console.error(err);
+    console.error("Govt scheme chat error:", err);
     return res.json({
       success: false,
       message: "Error processing govt scheme query."
     });
   }
 });
-
 // ---------- Test Route ----------
 app.get("/", (req, res) =>
   res.send("Kalki Finserv Bureau Parser API is LIVE 🚀")
