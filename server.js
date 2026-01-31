@@ -784,21 +784,36 @@ RULES:
       message: "Error processing govt scheme query."
     });
   }
-});
-app.get("/govt-vector-test", async (req, res) => {
-  const r = await openai.responses.create({
-    model: "gpt-4.1-mini",
-    input: "List all government schemes mentioned in the documents.",
-    tools: [
-      {
-        type: "file_search",
-        vector_store_ids: [process.env.GOVT_VECTOR_ID]
-      }
-    ],
-    max_output_tokens: 300
-  });
+});app.get("/govt-vector-test", async (req, res) => {
+  try {
+    const q = req.query.q || "CGTMSE eligibility criteria";
 
-  res.json({ answer: extractResponseText(r) });
+    const search = await openai.responses.create({
+      model: "gpt-4.1-mini",
+      input: q,
+      tools: [
+        {
+          type: "file_search",
+          vector_store_ids: [process.env.GOVT_VECTOR_ID]
+        }
+      ],
+      max_output_tokens: 300
+    });
+
+    const text =
+      search.output_text ||
+      JSON.stringify(search.output, null, 2);
+
+    res.json({
+      query: q,
+      raw: search.output,
+      answer: text
+    });
+
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // ---------- Test Route ----------
