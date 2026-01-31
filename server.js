@@ -737,20 +737,23 @@ app.post("/govt-schemes-chat", async (req, res) => {
       return res.json({ success: false, message: "No messages" });
     }
 
-    const response = await openai.responses.create({
+    // ---------------------------------------
+    // 1️⃣ RAW DOCUMENT ANSWER (STRICT RAG)
+    // ---------------------------------------
+    const rawResponse = await openai.responses.create({
       model: "gpt-4.1-mini",
       input: [
         {
           role: "system",
           content: `
-You are Kalki Govt Scheme Assistant for India.
+You are Kalki Govt Scheme Extractor.
 
-RULES:
-- Answer ONLY using the scheme documents provided.
-- If the documents do not clearly mention something, say:
+STRICT RULES:
+- Use ONLY the scheme documents provided.
+- Do NOT rephrase or summarize.
+- Extract all relevant factual information.
+- If something is not clearly written, say exactly:
   "I don't see this clearly mentioned in the scheme documents."
-- Do not guess or add outside information.
-- Quote numbers exactly as written.
 `
         },
         ...messages
@@ -761,18 +764,91 @@ RULES:
           vector_store_ids: [process.env.GOVT_VECTOR_ID]
         }
       ],
-      temperature: 0.1,
-      max_output_tokens: 900
+      temperature: 0,
+      max_output_tokens: 1200
     });
 
-    const answer =
-      response.output_text ||
+    const rawAnswer =
+      rawResponse.output_text ||
       "I don't see this clearly mentioned in the scheme documents.";
 
-    res.json({ success: true, answer });
+    // ---------------------------------------
+    // 2️⃣ SMART REWRITE (NO NEW FACTS)
+    // ---------------------------------------
+    const refineResponse = await openai.responses.create({
+      model: "gpt-4.1-mini",
+      input: [
+        {
+          role: "system",
+          content: `
+You are a Government Scheme Advisor.
+
+TASK:
+- Rewrite the given document answer to be:
+  • Short
+  • Precise
+  • Structured
+  • Human-friendly
+
+RULES:
+- DO NOT add facts
+- DO NOT remove important conditions
+- DO NOT guess
+- Keep bullets where helpful
+- Max 6–8 bullets
+`
+        },
+        {
+          role: "user",
+          content: rawAnswer
+        }
+      ],
+      temperature: 0.2,
+      max_output_tokens: 500
+    });
+
+    const finalAnswer =
+      refineResponse.output_text || rawAnswer;
+
+    // ---------------------------------------
+    // 3️⃣ FOLLOW-UP SUGGESTIONS (OPTIONAL)
+    // ---------------------------------------
+    const followUpResponse = await openai.responses.create({
+      model: "gpt-4.1-mini",
+      input: [
+        {
+          role: "system",
+          content: `
+Suggest 1–2 short follow-up questions a user might ask next.
+Rules:
+- Based ONLY on the answer
+- No new facts
+- Short, practical questions
+`
+        },
+        {
+          role: "user",
+          content: finalAnswer
+        }
+      ],
+      temperature: 0.3,
+      max_output_tokens: 120
+    });
+
+    const followUps =
+      followUpResponse.output_text || "";
+
+    // ---------------------------------------
+    // RESPONSE
+    // ---------------------------------------
+    res.json({
+      success: true,
+      answer: finalAnswer,
+      followUps
+    });
 
   } catch (err) {
-    console.error(err);
+    console.error("Govt scheme error:", err);
     res.json({
       success: false,
       message: "Error processing govt scheme query."
