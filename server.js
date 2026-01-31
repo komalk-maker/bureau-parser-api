@@ -735,86 +735,38 @@ ${JSON.stringify(safeLogic, null, 2)}
 // =====================================================
 app.post("/govt-schemes-chat", async (req, res) => {
   try {
-    const { messages = [] } = req.body || {};
+    const { messages } = req.body;
 
-    const lastUserMsg =
-      [...messages].reverse().find(m => m.role === "user")?.content || "";
-
-    // -----------------------------
-    // 1️⃣ INTENT CLASSIFICATION
-    // -----------------------------
-    const intentPrompt = `
-Classify the user's intent into ONE category:
-- DISCOVERY
-- SCHEME_DETAIL
-- DOCUMENTS
-- ELIGIBILITY
-- PROCESS
-- OUT_OF_SCOPE
-
-User query:
-"${lastUserMsg}"
-
-Respond ONLY with the intent word.
-`;
-
-    const intentRes = await openai.responses.create({
-      model: "gpt-4.1-mini",
-      input: intentPrompt,
-      temperature: 0,
-      max_output_tokens: 20
-    });
-
-    const intent =
-      extractResponseText(intentRes)?.trim() || "OUT_OF_SCOPE";
-
-    // -----------------------------
-    // 2️⃣ QUERY REWRITE FOR PDF SEARCH
-    // -----------------------------
-    let searchQuery = lastUserMsg;
-
-    if (intent === "DISCOVERY") {
-      searchQuery = `
-Identify applicable government loan or subsidy schemes based on:
-- borrower category
-- loan purpose
-- eligibility conditions
-
-List ONLY schemes explicitly mentioned in the documents.
-`;
+    if (!process.env.GOVT_VECTOR_ID) {
+      return res.json({
+        success: false,
+        message: "Govt scheme vector not configured."
+      });
     }
 
-    // -----------------------------
-    // 3️⃣ DOCUMENT-ONLY ANSWER
-    // -----------------------------
     const systemPrompt = `
-You are Kalki Govt Scheme Assistant.
+You are Kalki Govt Scheme Assistant for India.
 
-STRICT RULES:
-- Use ONLY information retrieved from the scheme documents.
-- If information is missing or unclear, say:
+RULES:
+- Answer ONLY from the uploaded government scheme documents.
+- If info is not clearly mentioned, say:
   "I don't see this clearly mentioned in the scheme documents."
-- Do NOT use outside knowledge.
-- Copy numbers and limits exactly as written.
-
-Answer intent: ${intent}
+- Do NOT guess.
+- Quote numbers exactly.
 `;
 
     const response = await openai.responses.create({
       model: "gpt-4.1-mini",
-
       input: [
         { role: "system", content: systemPrompt },
-        { role: "user", content: searchQuery }
+        ...messages
       ],
-
       tools: [
         {
           type: "file_search",
-          vector_store_ids: [GOVT_VECTOR_ID]
+          vector_store_ids: [process.env.GOVT_VECTOR_ID]
         }
       ],
-
       temperature: 0.1,
       max_output_tokens: 900
     });
@@ -823,11 +775,11 @@ Answer intent: ${intent}
       extractResponseText(response) ||
       "I don't see this clearly mentioned in the scheme documents.";
 
-    return res.json({ success: true, answer });
+    res.json({ success: true, answer });
 
   } catch (err) {
-    console.error("Govt scheme chat error:", err);
-    return res.json({
+    console.error(err);
+    res.json({
       success: false,
       message: "Error processing govt scheme query."
     });
