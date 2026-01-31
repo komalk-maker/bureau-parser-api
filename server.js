@@ -737,9 +737,24 @@ app.post("/govt-schemes-chat", async (req, res) => {
       return res.json({ success: false, message: "No messages" });
     }
 
-    // ---------------------------------------
-    // 1️⃣ RAW DOCUMENT ANSWER (STRICT RAG)
-    // ---------------------------------------
+    // -----------------------------
+    // 0️⃣ Detect user language
+    // -----------------------------
+    const lastUserMsg =
+      [...messages].reverse().find(m => m.role === "user")?.content || "";
+
+    let lang = "english";
+    if (/[ऀ-ॿ]/.test(lastUserMsg)) {
+      lang = "hindi";
+    } else if (
+      /(kya|hai|ka|ke|ki|loan|scheme|mil|eligibility|documents)/i.test(lastUserMsg)
+    ) {
+      lang = "hinglish";
+    }
+
+    // -----------------------------
+    // 1️⃣ RAW DOCUMENT EXTRACTION
+    // -----------------------------
     const rawResponse = await openai.responses.create({
       model: "gpt-4.1-mini",
       input: [
@@ -749,10 +764,10 @@ app.post("/govt-schemes-chat", async (req, res) => {
 You are Kalki Govt Scheme Extractor.
 
 STRICT RULES:
-- Use ONLY the scheme documents provided.
-- Do NOT rephrase or summarize.
-- Extract all relevant factual information.
-- If something is not clearly written, say exactly:
+- Use ONLY the provided scheme documents.
+- Do NOT explain or rewrite.
+- Extract all relevant factual points.
+- If something is missing, say exactly:
   "I don't see this clearly mentioned in the scheme documents."
 `
         },
@@ -772,83 +787,76 @@ STRICT RULES:
       rawResponse.output_text ||
       "I don't see this clearly mentioned in the scheme documents.";
 
-    // ---------------------------------------
-    // 2️⃣ SMART REWRITE (NO NEW FACTS)
-    // ---------------------------------------
-    const refineResponse = await openai.responses.create({
+    // -----------------------------
+    // 2️⃣ SMART REWRITE + LANGUAGE
+    // -----------------------------
+    const rewritePrompt = `
+Rewrite the following answer in ${lang.toUpperCase()}.
+
+STYLE RULES:
+${lang === "english" ? `
+- Clear professional English
+- Short paragraphs or bullets
+` : lang === "hindi" ? `
+- Simple Hindi (banking Hindi)
+- Avoid pure shuddh Hindi
+- Use bullets
+` : `
+- Hinglish (English + Hindi mix)
+- Simple conversational tone
+- Examples allowed
+`}
+
+IMPORTANT:
+- DO NOT add facts
+- DO NOT remove conditions
+- Numbers must stay exactly same
+- If source says information missing, keep that statement
+`;
+
+    const refined = await openai.responses.create({
       model: "gpt-4.1-mini",
       input: [
-        {
-          role: "system",
-          content: `
-You are a Government Scheme Advisor.
-
-TASK:
-- Rewrite the given document answer to be:
-  • Short
-  • Precise
-  • Structured
-  • Human-friendly
-
-RULES:
-- DO NOT add facts
-- DO NOT remove important conditions
-- DO NOT guess
-- Keep bullets where helpful
-- Max 6–8 bullets
-`
-        },
-        {
-          role: "user",
-          content: rawAnswer
-        }
+        { role: "system", content: rewritePrompt },
+        { role: "user", content: rawAnswer }
       ],
       temperature: 0.2,
-      max_output_tokens: 500
+      max_output_tokens: 600
     });
 
     const finalAnswer =
-      refineResponse.output_text || rawAnswer;
+      refined.output_text || rawAnswer;
 
-    // ---------------------------------------
-    // 3️⃣ FOLLOW-UP SUGGESTIONS (OPTIONAL)
-    // ---------------------------------------
-    const followUpResponse = await openai.responses.create({
-      model: "gpt-4.1-mini",
-      input: [
-        {
-          role: "system",
-          content: `
-Suggest 1–2 short follow-up questions a user might ask next.
+    // -----------------------------
+    // 3️⃣ FOLLOW-UP QUESTIONS
+    // -----------------------------
+    const followUpPrompt = `
+Suggest 1–2 short follow-up questions a user may ask next.
+Language: ${lang}
 Rules:
 - Based ONLY on the answer
-- No new facts
-- Short, practical questions
-`
-        },
-        {
-          role: "user",
-          content: finalAnswer
-        }
+- Practical questions only
+`;
+
+    const followUpsRes = await openai.responses.create({
+      model: "gpt-4.1-mini",
+      input: [
+        { role: "system", content: followUpPrompt },
+        { role: "user", content: finalAnswer }
       ],
       temperature: 0.3,
       max_output_tokens: 120
     });
 
-    const followUps =
-      followUpResponse.output_text || "";
-
-    // ---------------------------------------
-    // RESPONSE
-    // ---------------------------------------
     res.json({
       success: true,
+      language: lang,
       answer: finalAnswer,
-      followUps
+      followUps: followUpsRes.output_text || ""
     });
 
   } catch (err) {
-    console.error("Govt scheme error:", err);
+    console.error("Govt scheme chat error:", err);
     res.json({
       success: false,
       message: "Error processing govt scheme query."
