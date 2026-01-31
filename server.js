@@ -730,35 +730,29 @@ ${JSON.stringify(safeLogic, null, 2)}
   }
 });
 
-// =====================================================
-// GOVT SCHEME CHAT (3 PDFs only, via file_search)
-// =====================================================
 app.post("/govt-schemes-chat", async (req, res) => {
   try {
     const { messages } = req.body;
-
-    if (!process.env.GOVT_VECTOR_ID) {
-      return res.json({
-        success: false,
-        message: "Govt scheme vector not configured."
-      });
+    if (!Array.isArray(messages) || !messages.length) {
+      return res.json({ success: false, message: "No messages" });
     }
-
-    const systemPrompt = `
-You are Kalki Govt Scheme Assistant for India.
-
-RULES:
-- Answer ONLY from the uploaded government scheme documents.
-- If info is not clearly mentioned, say:
-  "I don't see this clearly mentioned in the scheme documents."
-- Do NOT guess.
-- Quote numbers exactly.
-`;
 
     const response = await openai.responses.create({
       model: "gpt-4.1-mini",
       input: [
-        { role: "system", content: systemPrompt },
+        {
+          role: "system",
+          content: `
+You are Kalki Govt Scheme Assistant for India.
+
+RULES:
+- Answer ONLY using the scheme documents provided.
+- If the documents do not clearly mention something, say:
+  "I don't see this clearly mentioned in the scheme documents."
+- Do not guess or add outside information.
+- Quote numbers exactly as written.
+`
+        },
         ...messages
       ],
       tools: [
@@ -772,7 +766,7 @@ RULES:
     });
 
     const answer =
-      extractResponseText(response) ||
+      response.output_text ||
       "I don't see this clearly mentioned in the scheme documents.";
 
     res.json({ success: true, answer });
@@ -784,7 +778,8 @@ RULES:
       message: "Error processing govt scheme query."
     });
   }
-});app.get("/govt-vector-test", async (req, res) => {
+});
+app.get("/govt-vector-test", async (req, res) => {
   try {
     const q = req.query.q || "CGTMSE eligibility criteria";
 
