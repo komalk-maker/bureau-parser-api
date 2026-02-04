@@ -653,46 +653,45 @@ ${fullText}
 });
 
 
-// =====================================================
-// CHAT ENDPOINT: /chat  (Enhanced — includes logic dump)
-// =====================================================
 app.post("/chat", async (req, res) => {
   try {
-    const { question, analysis, extras, logic } = req.body || {};
+    const { question, analysis, logic } = req.body || {};
 
     if (!question || typeof question !== "string") {
       return res.json({
         success: false,
-        message: "Missing question for chat.",
+        message: "Missing question for chat."
       });
     }
 
-    // Safe guards
-    const safeAnalysis = (analysis && typeof analysis === "object") ? analysis : {};
-    const safeExtras = (extras && typeof extras === "object") ? extras : {};
-    const safeLogic = (logic && typeof logic === "object") ? logic : {};
+    const safeAnalysis =
+      analysis && typeof analysis === "object" ? analysis : {};
 
-    // SYSTEM INSTRUCTIONS
+    const safeLogic =
+      logic && typeof logic === "object"
+        ? {
+            masters: logic.masters || {},
+            rules: logic.rules || {},
+            results: logic.results || {}
+          }
+        : {};
+
     const systemMessage = `
-You are "Kalki AI", an intelligent loan & bank statement assistant for KalkiFinserv.
+You are "Kalki AI", a financial advisor for KalkiFinserv.
 
-CONTEXT YOU RECEIVE:
-1. USER QUESTION (text)
-2. ANALYSIS_JSON → structured bureau data (score, loans, DPDS, EMIs, enquiries)
-3. EXTRAS_JSON → precomputed insights (ROI comparison, foreclosure tips, risk markers)
-4. LOGIC_JSON → full rules, formulas, functions, masters (bank lists, loan features, analyzers)
+IMPORTANT:
+- LOGIC_JSON.results is the SINGLE SOURCE OF TRUTH for all insights.
+- NEVER recompute values already present in LOGIC_JSON.results.
+- ANALYSIS_JSON is raw bureau data.
+- Use LOGIC_JSON.rules and masters only to explain reasoning.
 
-INSTRUCTIONS:
-- Always use ANALYSIS_JSON, EXTRAS_JSON, and LOGIC_JSON to answer.
-- Follow the EXACT formulas and rules given in LOGIC_JSON.
-- Do NOT invent numbers. Only use numbers provided in ANALYSIS_JSON or EXTRAS_JSON.
-- If LOGIC_JSON contains a formula or rule, follow it strictly.
-- If masters include icons, interest ranges, features, etc., use those EXACT values.
-- Keep responses simple, clear, and friendly — like a human financial advisor.
-- DO NOT mention prompts, JSON, or internal processing.
+RULES:
+- Do not invent numbers.
+- Do not guess interest rates or tenure.
+- Keep answers short, practical, and clear.
+- Speak like a human loan advisor.
 `;
 
-    // USER MESSAGE WITH ALL DATA INJECTED
     const userMessage = `
 QUESTION:
 ${question}
@@ -700,32 +699,29 @@ ${question}
 ANALYSIS_JSON:
 ${JSON.stringify(safeAnalysis, null, 2)}
 
-EXTRAS_JSON:
-${JSON.stringify(safeExtras, null, 2)}
-
 LOGIC_JSON:
 ${JSON.stringify(safeLogic, null, 2)}
 `;
 
-    // OPENAI CALL
     const response = await openai.responses.create({
       model: "gpt-4.1-mini",
       input: [
         { role: "system", content: systemMessage },
         { role: "user", content: userMessage }
-      ]
+      ],
+      temperature: 0.2
     });
 
     const answer =
       response?.output?.[0]?.content?.[0]?.text ||
-      "Sorry, I couldn’t generate a meaningful reply.";
+      "Sorry, I couldn’t generate a reply.";
 
     res.json({ success: true, answer });
   } catch (err) {
     console.error("Error in /chat:", err);
     res.json({
       success: false,
-      message: "Error while generating chat response.",
+      message: "Error while generating chat response."
     });
   }
 });
