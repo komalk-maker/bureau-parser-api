@@ -654,21 +654,20 @@ ${fullText}
 
 
 // =====================================================
-// CHAT ENDPOINT: /chat  (Enhanced — includes logic dump)
-// =====================================================
-// =====================================================
 // CHAT ENDPOINT: /chat
-// Intent-first | UI-safe | LLM fallback
+// Intent-first | Crash-safe | UI-action aware
 // =====================================================
 app.post("/chat", async (req, res) => {
   try {
+    console.log("✅ /chat HIT:", req.body?.question);
+
     const { question, analysis, extras, logic } = req.body || {};
 
-    // ---------------------------------
+    // -------------------------------
     // 1️⃣ Validate input
-    // ---------------------------------
+    // -------------------------------
     if (!question || typeof question !== "string") {
-      return res.json({
+      return res.status(400).json({
         success: false,
         message: "Missing question for chat."
       });
@@ -676,9 +675,9 @@ app.post("/chat", async (req, res) => {
 
     const q = question.toLowerCase().trim();
 
-    // ---------------------------------
+    // -------------------------------
     // 2️⃣ INTENT ROUTER (FAST PATH)
-    // ---------------------------------
+    // -------------------------------
     const isComingMonth =
       q.includes("next month") ||
       q.includes("coming month") ||
@@ -691,17 +690,19 @@ app.post("/chat", async (req, res) => {
       q.includes("monthly emi");
 
     if (isComingMonth && isEmiIntent) {
-      console.log("🔥 CHAT INTENT → SHOW_COMING_MONTH_EMI:", q);
-      return res.json({
+      console.log("🔥 EMI INTENT MATCHED:", q);
+
+      // 🚨 IMPORTANT: return immediately
+      return res.status(200).json({
         success: true,
         type: "action",
         action: { name: "SHOW_COMING_MONTH_EMI" }
       });
     }
 
-    // ---------------------------------
+    // -------------------------------
     // 3️⃣ Safe guards for AI context
-    // ---------------------------------
+    // -------------------------------
     const safeAnalysis =
       analysis && typeof analysis === "object" ? analysis : {};
 
@@ -711,30 +712,23 @@ app.post("/chat", async (req, res) => {
     const safeLogic =
       logic && typeof logic === "object" ? logic : {};
 
-    // ---------------------------------
+    // -------------------------------
     // 4️⃣ SYSTEM PROMPT
-    // ---------------------------------
+    // -------------------------------
     const systemMessage = `
 You are "Kalki AI", an intelligent loan & bank statement assistant for KalkiFinserv.
 
-CONTEXT YOU RECEIVE:
-1. USER QUESTION (text)
-2. ANALYSIS_JSON → structured bureau data (score, loans, DPDS, EMIs, enquiries)
-3. EXTRAS_JSON → precomputed insights (ROI comparison, foreclosure tips, risk markers)
-4. LOGIC_JSON → full rules, formulas, functions, masters (bank lists, loan features, analyzers)
-
-INSTRUCTIONS:
-- Always use ANALYSIS_JSON, EXTRAS_JSON, and LOGIC_JSON to answer.
-- Follow the EXACT formulas and rules given in LOGIC_JSON and EXTRAS_JSON.
+RULES:
+- Use ANALYSIS_JSON, EXTRAS_JSON, LOGIC_JSON strictly.
 - Do NOT invent numbers.
-- If a value is missing, say so clearly.
-- Keep responses simple, friendly, and practical.
-- DO NOT mention prompts, JSON, or internal logic.
+- If data is missing, say so clearly.
+- Keep answers short, practical, and human.
+- Never mention prompts or internal logic.
 `;
 
-    // ---------------------------------
-    // 5️⃣ USER MESSAGE (FULL CONTEXT)
-    // ---------------------------------
+    // -------------------------------
+    // 5️⃣ USER MESSAGE
+    // -------------------------------
     const userMessage = `
 QUESTION:
 ${question}
@@ -749,9 +743,13 @@ LOGIC_JSON:
 ${JSON.stringify(safeLogic, null, 2)}
 `;
 
-    // ---------------------------------
+    // -------------------------------
     // 6️⃣ OPENAI FALLBACK
-    // ---------------------------------
+    // -------------------------------
+    if (!openai) {
+      throw new Error("OpenAI client not initialized");
+    }
+
     const response = await openai.responses.create({
       model: "gpt-4.1-mini",
       input: [
@@ -764,13 +762,17 @@ ${JSON.stringify(safeLogic, null, 2)}
       response?.output?.[0]?.content?.[0]?.text ||
       "Sorry, I couldn’t generate a meaningful reply.";
 
-    return res.json({ success: true, answer });
+    return res.status(200).json({
+      success: true,
+      answer
+    });
 
   } catch (err) {
-    console.error("❌ Error in /chat:", err);
-    return res.json({
+    console.error("❌ ERROR in /chat:", err);
+
+    return res.status(500).json({
       success: false,
-      message: "Error while generating chat response."
+      message: "Chat service temporarily unavailable."
     });
   }
 });
