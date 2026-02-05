@@ -656,23 +656,64 @@ ${fullText}
 // =====================================================
 // CHAT ENDPOINT: /chat  (Enhanced — includes logic dump)
 // =====================================================
+// =====================================================
+// CHAT ENDPOINT: /chat
+// Intent-first | UI-safe | LLM fallback
+// =====================================================
 app.post("/chat", async (req, res) => {
   try {
     const { question, analysis, extras, logic } = req.body || {};
 
+    // ---------------------------------
+    // 1️⃣ Validate input
+    // ---------------------------------
     if (!question || typeof question !== "string") {
       return res.json({
         success: false,
-        message: "Missing question for chat.",
+        message: "Missing question for chat."
       });
     }
 
-    // Safe guards
-    const safeAnalysis = (analysis && typeof analysis === "object") ? analysis : {};
-    const safeExtras = (extras && typeof extras === "object") ? extras : {};
-    const safeLogic = (logic && typeof logic === "object") ? logic : {};
+    const q = question.toLowerCase().trim();
 
-    // SYSTEM INSTRUCTIONS
+    // ---------------------------------
+    // 2️⃣ INTENT ROUTER (FAST PATH)
+    // ---------------------------------
+    const isComingMonth =
+      q.includes("next month") ||
+      q.includes("coming month") ||
+      q.includes("upcoming month");
+
+    const isEmiIntent =
+      q.includes("emi") ||
+      q.includes("outflow") ||
+      q.includes("monthly payment") ||
+      q.includes("monthly emi");
+
+    if (isComingMonth && isEmiIntent) {
+      console.log("🔥 CHAT INTENT → SHOW_COMING_MONTH_EMI:", q);
+      return res.json({
+        success: true,
+        type: "action",
+        action: { name: "SHOW_COMING_MONTH_EMI" }
+      });
+    }
+
+    // ---------------------------------
+    // 3️⃣ Safe guards for AI context
+    // ---------------------------------
+    const safeAnalysis =
+      analysis && typeof analysis === "object" ? analysis : {};
+
+    const safeExtras =
+      extras && typeof extras === "object" ? extras : {};
+
+    const safeLogic =
+      logic && typeof logic === "object" ? logic : {};
+
+    // ---------------------------------
+    // 4️⃣ SYSTEM PROMPT
+    // ---------------------------------
     const systemMessage = `
 You are "Kalki AI", an intelligent loan & bank statement assistant for KalkiFinserv.
 
@@ -685,14 +726,15 @@ CONTEXT YOU RECEIVE:
 INSTRUCTIONS:
 - Always use ANALYSIS_JSON, EXTRAS_JSON, and LOGIC_JSON to answer.
 - Follow the EXACT formulas and rules given in LOGIC_JSON and EXTRAS_JSON.
-- Do NOT invent numbers. Only use numbers provided in ANALYSIS_JSON or EXTRAS_JSON.
-- If LOGIC_JSON contains a formula or rule, follow it strictly.
-- If masters include icons, interest ranges, features, etc., use those EXACT values.
-- Keep responses simple, clear, and friendly — like a human financial advisor.
-- DO NOT mention prompts, JSON, or internal processing.
+- Do NOT invent numbers.
+- If a value is missing, say so clearly.
+- Keep responses simple, friendly, and practical.
+- DO NOT mention prompts, JSON, or internal logic.
 `;
 
-    // USER MESSAGE WITH ALL DATA INJECTED
+    // ---------------------------------
+    // 5️⃣ USER MESSAGE (FULL CONTEXT)
+    // ---------------------------------
     const userMessage = `
 QUESTION:
 ${question}
@@ -706,22 +748,10 @@ ${JSON.stringify(safeExtras, null, 2)}
 LOGIC_JSON:
 ${JSON.stringify(safeLogic, null, 2)}
 `;
-const q = question.toLowerCase();
 
-const q = question.toLowerCase();
-
-// 🔥 FAST PATH: UI ACTIONS
-if (
-  q.includes("next month") &&
-  (q.includes("emi") || q.includes("outflow"))
-) {
-  return res.json({
-    success: true,
-    type: "action",
-    action: "SHOW_COMING_MONTH_EMI"
-  });
-}
-    // OPENAI CALL
+    // ---------------------------------
+    // 6️⃣ OPENAI FALLBACK
+    // ---------------------------------
     const response = await openai.responses.create({
       model: "gpt-4.1-mini",
       input: [
@@ -734,12 +764,13 @@ if (
       response?.output?.[0]?.content?.[0]?.text ||
       "Sorry, I couldn’t generate a meaningful reply.";
 
-    res.json({ success: true, answer });
+    return res.json({ success: true, answer });
+
   } catch (err) {
-    console.error("Error in /chat:", err);
-    res.json({
+    console.error("❌ Error in /chat:", err);
+    return res.json({
       success: false,
-      message: "Error while generating chat response.",
+      message: "Error while generating chat response."
     });
   }
 });
