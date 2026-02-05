@@ -706,7 +706,21 @@ ${JSON.stringify(safeExtras, null, 2)}
 LOGIC_JSON:
 ${JSON.stringify(safeLogic, null, 2)}
 `;
+const q = question.toLowerCase();
 
+const q = question.toLowerCase();
+
+// 🔥 FAST PATH: UI ACTIONS
+if (
+  q.includes("next month") &&
+  (q.includes("emi") || q.includes("outflow"))
+) {
+  return res.json({
+    success: true,
+    type: "action",
+    action: "SHOW_COMING_MONTH_EMI"
+  });
+}
     // OPENAI CALL
     const response = await openai.responses.create({
       model: "gpt-4.1-mini",
