@@ -653,17 +653,14 @@ ${fullText}
 });
 
 
-// =====================================================
-// CHAT ENDPOINT: /chat  (Enhanced — includes logic dump)
-// =====================================================
 app.post("/chat", async (req, res) => {
   try {
     const { question, analysis, extras, logic } = req.body || {};
 
     if (!question || typeof question !== "string") {
       return res.json({
-        success: false,
-        message: "Missing question."
+        success: true,
+        actions: []
       });
     }
 
@@ -687,7 +684,7 @@ Your ONLY job:
 - Decide whether the user's question requires showing the EMI Outflow card.
 
 Available card:
-- COMING_MONTH_EMI → Shows total EMI, principal, and interest for the coming month
+- COMING_MONTH_EMI
 
 Trigger this card if the user asks about:
 - total EMI
@@ -704,21 +701,9 @@ Response rules:
 - Never invent cards
 `;
 
-    /* =====================================================
-       👤 USER MESSAGE (QUESTION + CONTEXT)
-       ===================================================== */
     const userMessage = `
 USER QUESTION:
 ${question}
-
-ANALYSIS_JSON:
-${JSON.stringify(safeAnalysis)}
-
-EXTRAS_JSON:
-${JSON.stringify(safeExtras)}
-
-LOGIC_JSON:
-${JSON.stringify(safeLogic)}
 `;
 
     const response = await openai.responses.create({
@@ -729,20 +714,17 @@ ${JSON.stringify(safeLogic)}
       ]
     });
 
-    const raw =
-      response?.output?.[0]?.content?.[0]?.text;
+    // ✅ SAFE OUTPUT EXTRACTION
+    let rawText = response.output_text || "";
 
     let parsed;
-
     try {
-      parsed = JSON.parse(raw);
-    } catch (e) {
-      // fallback safety
+      parsed = JSON.parse(rawText);
+    } catch {
       parsed = {
         actions: [{
           type: "SHOW_CARD",
-          cardId: "COMING_MONTH_EMI",
-          message: "Here’s your upcoming EMI outflow 👇"
+          cardId: "COMING_MONTH_EMI"
         }]
       };
     }
@@ -754,9 +736,14 @@ ${JSON.stringify(safeLogic)}
 
   } catch (err) {
     console.error("Chat error:", err);
+
+    // ⚠️ NEVER break chat UI
     return res.json({
-      success: false,
-      message: "AI error."
+      success: true,
+      actions: [{
+        type: "SHOW_CARD",
+        cardId: "COMING_MONTH_EMI"
+      }]
     });
   }
 });
