@@ -663,51 +663,64 @@ app.post("/chat", async (req, res) => {
     if (!question || typeof question !== "string") {
       return res.json({
         success: false,
-        message: "Missing question for chat.",
+        message: "Missing question."
       });
     }
 
-    // Safe guards
+    // Safety guards
     const safeAnalysis = (analysis && typeof analysis === "object") ? analysis : {};
     const safeExtras = (extras && typeof extras === "object") ? extras : {};
     const safeLogic = (logic && typeof logic === "object") ? logic : {};
 
-    // SYSTEM INSTRUCTIONS
+    /* =====================================================
+       🧠 SYSTEM PROMPT — INTENT ROUTER (EMI ONLY)
+       ===================================================== */
     const systemMessage = `
-You are "Kalki AI", an intelligent loan & bank statement assistant for KalkiFinserv.
+You are Kalki AI, an intent router for a financial dashboard.
 
-CONTEXT YOU RECEIVE:
-1. USER QUESTION (text)
-2. ANALYSIS_JSON → structured bureau data (score, loans, DPDS, EMIs, enquiries)
-3. EXTRAS_JSON → precomputed insights (ROI comparison, foreclosure tips, risk markers)
-4. LOGIC_JSON → full rules, formulas, functions, masters (bank lists, loan features, analyzers)
+Your role:
+- DO NOT calculate numbers
+- DO NOT explain EMI amounts
+- DO NOT repeat bureau data
 
-INSTRUCTIONS:
-- Always use ANALYSIS_JSON, EXTRAS_JSON, and LOGIC_JSON to answer.
-- Follow the EXACT formulas and rules given in LOGIC_JSON.
-- Do NOT invent numbers. Only use numbers provided in ANALYSIS_JSON or EXTRAS_JSON.
-- If LOGIC_JSON contains a formula or rule, follow it strictly.
-- If masters include icons, interest ranges, features, etc., use those EXACT values.
-- Keep responses simple, clear, and friendly — like a human financial advisor.
-- DO NOT mention prompts, JSON, or internal processing.
+Your ONLY job:
+- Decide whether the user's question requires showing the EMI Outflow card.
+
+Available card:
+- COMING_MONTH_EMI → Shows total EMI, principal, and interest for the coming month
+
+Trigger this card if the user asks about:
+- total EMI
+- next month EMI
+- EMI outflow
+- monthly EMI burden
+- EMI breakup
+- how much EMI they need to pay
+
+Response rules:
+- Respond ONLY in valid JSON
+- Return an "actions" array
+- Never return plain text
+- Never invent cards
 `;
 
-    // USER MESSAGE WITH ALL DATA INJECTED
+    /* =====================================================
+       👤 USER MESSAGE (QUESTION + CONTEXT)
+       ===================================================== */
     const userMessage = `
-QUESTION:
+USER QUESTION:
 ${question}
 
 ANALYSIS_JSON:
-${JSON.stringify(safeAnalysis, null, 2)}
+${JSON.stringify(safeAnalysis)}
 
 EXTRAS_JSON:
-${JSON.stringify(safeExtras, null, 2)}
+${JSON.stringify(safeExtras)}
 
 LOGIC_JSON:
-${JSON.stringify(safeLogic, null, 2)}
+${JSON.stringify(safeLogic)}
 `;
 
-    // OPENAI CALL
     const response = await openai.responses.create({
       model: "gpt-4.1-mini",
       input: [
@@ -716,16 +729,34 @@ ${JSON.stringify(safeLogic, null, 2)}
       ]
     });
 
-    const answer =
-      response?.output?.[0]?.content?.[0]?.text ||
-      "Sorry, I couldn’t generate a meaningful reply.";
+    const raw =
+      response?.output?.[0]?.content?.[0]?.text;
 
-    res.json({ success: true, answer });
+    let parsed;
+
+    try {
+      parsed = JSON.parse(raw);
+    } catch (e) {
+      // fallback safety
+      parsed = {
+        actions: [{
+          type: "SHOW_CARD",
+          cardId: "COMING_MONTH_EMI",
+          message: "Here’s your upcoming EMI outflow 👇"
+        }]
+      };
+    }
+
+    return res.json({
+      success: true,
+      actions: parsed.actions || []
+    });
+
   } catch (err) {
-    console.error("Error in /chat:", err);
-    res.json({
+    console.error("Chat error:", err);
+    return res.json({
       success: false,
-      message: "Error while generating chat response.",
+      message: "AI error."
     });
   }
 });
