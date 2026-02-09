@@ -25,8 +25,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const app = express();
 app.use(cors());
-app.use(express.json({ limit: "20mb" }));
-app.use(express.urlencoded({ limit: "20mb", extended: true }));
+app.use(express.json());
 
 // File upload handler
 const upload = multer({ dest: "uploads/" });
@@ -653,59 +652,61 @@ ${fullText}
 });
 
 
+// =====================================================
+// CHAT ENDPOINT: /chat  (Enhanced — includes logic dump)
+// =====================================================
 app.post("/chat", async (req, res) => {
   try {
     const { question, analysis, extras, logic } = req.body || {};
 
     if (!question || typeof question !== "string") {
       return res.json({
-        success: true,
-        actions: []
+        success: false,
+        message: "Missing question for chat.",
       });
     }
 
-    // Safety guards
+    // Safe guards
     const safeAnalysis = (analysis && typeof analysis === "object") ? analysis : {};
     const safeExtras = (extras && typeof extras === "object") ? extras : {};
     const safeLogic = (logic && typeof logic === "object") ? logic : {};
 
-    /* =====================================================
-       🧠 SYSTEM PROMPT — INTENT ROUTER (EMI ONLY)
-       ===================================================== */
+    // SYSTEM INSTRUCTIONS
     const systemMessage = `
-You are Kalki AI, an intent router for a financial dashboard.
+You are "Kalki AI", an intelligent loan & bank statement assistant for KalkiFinserv.
 
-Your role:
-- DO NOT calculate numbers
-- DO NOT explain EMI amounts
-- DO NOT repeat bureau data
+CONTEXT YOU RECEIVE:
+1. USER QUESTION (text)
+2. ANALYSIS_JSON → structured bureau data (score, loans, DPDS, EMIs, enquiries)
+3. EXTRAS_JSON → precomputed insights (ROI comparison, foreclosure tips, risk markers)
+4. LOGIC_JSON → full rules, formulas, functions, masters (bank lists, loan features, analyzers)
 
-Your ONLY job:
-- Decide whether the user's question requires showing the EMI Outflow card.
-
-Available card:
-- COMING_MONTH_EMI
-
-Trigger this card if the user asks about:
-- total EMI
-- next month EMI
-- EMI outflow
-- monthly EMI burden
-- EMI breakup
-- how much EMI they need to pay
-
-Response rules:
-- Respond ONLY in valid JSON
-- Return an "actions" array
-- Never return plain text
-- Never invent cards
+INSTRUCTIONS:
+- Always use ANALYSIS_JSON, EXTRAS_JSON, and LOGIC_JSON to answer.
+- Follow the EXACT formulas and rules given in LOGIC_JSON.
+- Do NOT invent numbers. Only use numbers provided in ANALYSIS_JSON or EXTRAS_JSON.
+- If LOGIC_JSON contains a formula or rule, follow it strictly.
+- If masters include icons, interest ranges, features, etc., use those EXACT values.
+- Keep responses simple, clear, and friendly — like a human financial advisor.
+- DO NOT mention prompts, JSON, or internal processing.
 `;
 
+    // USER MESSAGE WITH ALL DATA INJECTED
     const userMessage = `
-USER QUESTION:
+QUESTION:
 ${question}
+
+ANALYSIS_JSON:
+${JSON.stringify(safeAnalysis, null, 2)}
+
+EXTRAS_JSON:
+${JSON.stringify(safeExtras, null, 2)}
+
+LOGIC_JSON:
+${JSON.stringify(safeLogic, null, 2)}
 `;
 
+    // OPENAI CALL
     const response = await openai.responses.create({
       model: "gpt-4.1-mini",
       input: [
@@ -714,202 +715,92 @@ ${question}
       ]
     });
 
-    // ✅ SAFE OUTPUT EXTRACTION
-    let rawText = response.output_text || "";
+    const answer =
+      response?.output?.[0]?.content?.[0]?.text ||
+      "Sorry, I couldn’t generate a meaningful reply.";
 
-    let parsed;
-    try {
-      parsed = JSON.parse(rawText);
-    } catch {
-      parsed = {
-        actions: [{
-          type: "SHOW_CARD",
-          cardId: "COMING_MONTH_EMI"
-        }]
-      };
-    }
-
-    return res.json({
-      success: true,
-      actions: parsed.actions || []
-    });
-
+    res.json({ success: true, answer });
   } catch (err) {
-    console.error("Chat error:", err);
-
-    // ⚠️ NEVER break chat UI
-    return res.json({
-      success: true,
-      actions: [{
-        type: "SHOW_CARD",
-        cardId: "COMING_MONTH_EMI"
-      }]
-    });
-  }
-});
-
-app.post("/govt-schemes-chat", async (req, res) => {
-  try {
-    const { messages } = req.body;
-    if (!Array.isArray(messages) || !messages.length) {
-      return res.json({ success: false, message: "No messages" });
-    }
-
-    // -----------------------------
-    // 0️⃣ Detect user language
-    // -----------------------------
-    const lastUserMsg =
-      [...messages].reverse().find(m => m.role === "user")?.content || "";
-
-    let lang = "english";
-    if (/[ऀ-ॿ]/.test(lastUserMsg)) {
-      lang = "hindi";
-    } else if (
-      /(kya|hai|ka|ke|ki|loan|scheme|mil|eligibility|documents)/i.test(lastUserMsg)
-    ) {
-      lang = "hinglish";
-    }
-
-    // -----------------------------
-    // 1️⃣ RAW DOCUMENT EXTRACTION
-    // -----------------------------
-    const rawResponse = await openai.responses.create({
-      model: "gpt-4.1-mini",
-      input: [
-        {
-          role: "system",
-          content: `
-You are Kalki Govt Scheme Extractor.
-
-STRICT RULES:
-- Use ONLY the provided scheme documents.
-- Do NOT explain or rewrite.
-- Extract all relevant factual points.
-- If something is missing, say exactly:
-  "I don't see this clearly mentioned in the scheme documents."
-`
-        },
-        ...messages
-      ],
-      tools: [
-        {
-          type: "file_search",
-          vector_store_ids: [process.env.GOVT_VECTOR_ID]
-        }
-      ],
-      temperature: 0,
-      max_output_tokens: 1200
-    });
-
-    const rawAnswer =
-      rawResponse.output_text ||
-      "I don't see this clearly mentioned in the scheme documents.";
-
-    // -----------------------------
-    // 2️⃣ SMART REWRITE + LANGUAGE
-    // -----------------------------
-    const rewritePrompt = `
-Rewrite the following answer in ${lang.toUpperCase()}.
-
-STYLE RULES:
-${lang === "english" ? `
-- Clear professional English
-- Short paragraphs or bullets
-` : lang === "hindi" ? `
-- Simple Hindi (banking Hindi)
-- Avoid pure shuddh Hindi
-- Use bullets
-` : `
-- Hinglish (English + Hindi mix)
-- Simple conversational tone
-- Examples allowed
-`}
-
-IMPORTANT:
-- DO NOT add facts
-- DO NOT remove conditions
-- Numbers must stay exactly same
-- If source says information missing, keep that statement
-`;
-
-    const refined = await openai.responses.create({
-      model: "gpt-4.1-mini",
-      input: [
-        { role: "system", content: rewritePrompt },
-        { role: "user", content: rawAnswer }
-      ],
-      temperature: 0.2,
-      max_output_tokens: 600
-    });
-
-    const finalAnswer =
-      refined.output_text || rawAnswer;
-
-    // -----------------------------
-    // 3️⃣ FOLLOW-UP QUESTIONS
-    // -----------------------------
-    const followUpPrompt = `
-Suggest 1–2 short follow-up questions a user may ask next.
-Language: ${lang}
-Rules:
-- Based ONLY on the answer
-- Practical questions only
-`;
-
-    const followUpsRes = await openai.responses.create({
-      model: "gpt-4.1-mini",
-      input: [
-        { role: "system", content: followUpPrompt },
-        { role: "user", content: finalAnswer }
-      ],
-      temperature: 0.3,
-      max_output_tokens: 120
-    });
-
-    res.json({
-      success: true,
-      language: lang,
-      answer: finalAnswer,
-      followUps: followUpsRes.output_text || ""
-    });
-
-  } catch (err) {
-    console.error("Govt scheme chat error:", err);
+    console.error("Error in /chat:", err);
     res.json({
       success: false,
-      message: "Error processing govt scheme query."
+      message: "Error while generating chat response.",
     });
   }
 });
-app.get("/govt-vector-test", async (req, res) => {
+
+// =====================================================
+// GOVT SCHEME CHAT (3 PDFs only, via file_search)
+// =====================================================
+app.post("/govt-schemes-chat", async (req, res) => {
   try {
-    const q = req.query.q || "CGTMSE eligibility criteria";
+    if (!GOVT_VECTOR_ID) {
+      return res.json({
+        success: false,
+        message:
+          "Govt schemes vector store not configured. Set GOVT_SCHEMES_VECTOR_STORE_ID in env.",
+      });
+    }
 
-    const search = await openai.responses.create({
+    const { messages } = req.body || {};
+
+    if (!Array.isArray(messages) || messages.length === 0) {
+      return res.json({
+        success: false,
+        message: "Missing messages array for govt schemes chat.",
+      });
+    }
+
+    const systemPrompt = `
+You are "Kalki Govt Scheme Assistant" for Indian Government loan/subsidy/guarantee schemes.
+
+KNOWLEDGE:
+- You are ONLY allowed to use information from the three indexed PDFs provided by KalkiFinserv.
+- You access those PDFs through the 'file_search' tool and must NOT use any outside knowledge.
+- If the PDFs do not clearly cover something, say: "I don't see this clearly in the scheme documents" and stop. Do NOT guess.
+
+BEHAVIOUR:
+- Understand natural language questions in English, Hinglish and simple Indian language mix.
+- When user asks about a specific scheme, use file_search to find that scheme's section and answer:
+  • Eligibility
+  • Documents required
+  • Benefits / subsidy / guarantee coverage / interest subvention
+  • ROI (if written in the PDFs)
+  • Tenure, security/collateral, exclusions, claim/settlement process
+- When user says "Any scheme for me?" or similar:
+  • Ask 2–3 short questions (who are they – MSME/farmer/student/SHG/home buyer etc., loan amount, purpose)
+  • Then search in PDFs and suggest 1–3 schemes with brief reasoning, strictly based on the documents.
+- When mentioning numbers (subsidy %, max loan, guarantee cover etc.) copy them exactly from the PDFs. Never invent.
+
+FORMAT:
+- Answer in clear paragraphs and bullet points.
+- Do not mention tools, file_search, PDFs or that you are an AI.
+`;
+
+    const response = await openai.responses.create({
       model: "gpt-4.1-mini",
-      input: q,
-      tools: [
-        {
-          type: "file_search",
-          vector_store_ids: [process.env.GOVT_VECTOR_ID]
-        }
+      input: [
+        { role: "system", content: systemPrompt },
+        ...messages,
       ],
-      max_output_tokens: 300
+      tools: [{ type: "file_search" }],
+      tool_config: {
+        file_search: {
+          vector_store_ids: [GOVT_VECTOR_ID],
+        },
+      },
+      max_output_tokens: 900,
+      temperature: 0.2,
     });
 
-    const text =
-      search.output_text ||
-      JSON.stringify(search.output, null, 2);
-
-    res.json({
-      query: q,
-      raw: search.output,
-      answer: text
+    const answer = extractResponseText(response) || "I could not generate a reply.";
+    return res.json({ success: true, answer });
+  } catch (err) {
+    console.error("Error in /govt-schemes-chat:", err);
+    return res.json({
+      success: false,
+      message: "Error while generating govt scheme chat response.",
     });
-
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: e.message });
   }
 });
 
